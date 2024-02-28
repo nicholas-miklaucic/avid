@@ -1,0 +1,12 @@
+[tool.ruff]
+extend-include = ["*.ipynb"]
+
+
+line-length = 100
+
+[tool.ruff.format]
+quote-style = 'single'
+
+[tool.ruff.lint]
+# Doesn't work with jaxtyping.
+ignore = ["F722"]

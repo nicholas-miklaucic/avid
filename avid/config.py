@@ -1,0 +1,130 @@
+from enum import Enum
+import logging
+from dataclasses import dataclass
+import pyrallis
+from pyrallis import field
+from pathlib import Path
+
+pyrallis.set_config_type('toml')
+
+
+@dataclass
+class DataEncoderConfig:
+    """Controls how crystals are encoded into a grid."""
+
+    # The grid size per axis.
+    n_grid: int = 24
+
+    # The power to raise the distance to when computing probabilities. 2 is a Gaussian distribution,
+    # 1 is Laplace, and higher values produce tighter spheres around the center.
+    distance_power: float = 2.0
+
+    # Constant multiplied by the atom radius to get the standard deviation of the generalized
+    # normal.
+    eff_scale: float = 0.7
+
+    # The number of cells in each direction to extend outwards for computing the probabilities.
+    # Higher values are more numerically precise but take longer to process, although there's no
+    # impact on the runtime of training or inference beyond the preprocessing step.
+    num_cells: int = 4
+
+    @property
+    def n_points(self) -> int:
+        """The total number of points in a single unit cell."""
+        return self.n_grid**3
+
+
+@dataclass
+class DataConfig:
+    # The batch size for processing. The dataset size is 2^4 x 7 x 13^2, so 52 is a reasonable
+    # value that I've picked to make even batches.
+    data_batch_size: int = 52
+
+    # Folder of dataset.
+    data_folder: Path = Path('precomputed/')
+
+    # Train split.
+    train_split: int = 6
+    # Test split.
+    test_split: int = 1
+    # Valid split:
+    valid_split: int = 0
+
+
+class LoggingLevel(Enum):
+    """The logging level."""
+
+    debug = logging.DEBUG
+    info = logging.INFO
+    warning = logging.WARNING
+    error = logging.ERROR
+    critical = logging.CRITICAL
+
+
+@dataclass
+class CLIConfig:
+    # Verbosity of output.
+    verbosity: LoggingLevel = LoggingLevel.info
+    # Whether to show progress bars.
+    show_progress: bool = True
+
+    def set_up_logging(self):
+        from rich.logging import RichHandler
+
+        logging.basicConfig(
+            level=self.verbosity.value,
+            format='%(message)s',
+            datefmt='[%X]',
+            handlers=[
+                RichHandler(
+                    rich_tracebacks=True,
+                    show_time=False,
+                    show_level=False,
+                    show_path=False,
+                )
+            ],
+        )
+
+
+@dataclass
+class MainConfig:
+    # The batch size. Should be a multiple of data_batch_size to make data loading simple.
+    batch_size: int = 52 * 4
+
+    data_encoder: DataEncoderConfig = field(default_factory=DataEncoderConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    cli: CLIConfig = field(default_factory=CLIConfig)
+
+    def __post_init__(self):
+        if self.batch_size % self.data.data_batch_size != 0:
+            raise ValueError(
+                'Training batch size should be multiple of data batch size: {} does not divide {}'.format(
+                    self.batch_size, self.data.data_batch_size
+                )
+            )
+
+    @property
+    def train_batch_multiple(self) -> int:
+        """How many files should be loaded per training step."""
+        return self.batch_size // self.data.data_batch_size
+
+
+if __name__ == '__main__':
+    from pathlib import Path
+
+    from rich.prompt import Confirm
+
+    if Confirm.ask('Generate configs/defaults.toml and configs/minimal.toml?'):
+        default_path = Path('configs') / 'defaults.toml'
+        minimal_path = Path('configs') / 'minimal.toml'
+
+        default = MainConfig()
+
+        with open(default_path, 'w') as outfile:
+            pyrallis.cfgparsing.dump(default, outfile)
+
+        with open(minimal_path, 'w') as outfile:
+            pyrallis.cfgparsing.dump(default, outfile, omit_defaults=True)
+
+        with default_path.open('r') as conf:
+            pyrallis.cfgparsing.load(MainConfig, conf)

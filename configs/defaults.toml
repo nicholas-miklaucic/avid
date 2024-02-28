@@ -1,0 +1,18 @@
+batch_size = 208
+
+[data_encoder]
+n_grid = 24
+distance_power = 2.0
+eff_scale = 0.7
+num_cells = 4
+
+[data]
+data_batch_size = 52
+data_folder = "precomputed"
+train_split = 6
+test_split = 1
+valid_split = 0
+
+[cli]
+verbosity = "info"
+show_progress = true

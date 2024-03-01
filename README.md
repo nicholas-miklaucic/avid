@@ -1,4 +1,15 @@
 # AVID
+
 ## Acronym Very Incomplete: Diffusion?
 
-Work on applying diffusion and vision transformers to materials. Right now, I'm just doing cubic perovskites. Cool stuff TBD.
+Work on applying diffusion and vision transformers to materials. Right now, I'm
+just doing cubic perovskites. Cool stuff TBD.
+
+## Installation
+
+[Install JAX](https://jax.readthedocs.io/en/latest/installation.html), and then
+install the other necessary libraries:
+
+```bash
+pip install toml pyrallis rho-plus equinox diffrax optax plotext rich einops pandas plotly matplotlib seaborn pymatgen tfp-nightly[jax]
+```

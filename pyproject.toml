@@ -9,4 +9,5 @@ quote-style = 'single'
 
 [tool.ruff.lint]
 # Doesn't work with jaxtyping.
-ignore = ["F722"]
+# Allow lambda defs
+ignore = ["F722", "E731"]

@@ -1,4 +1,5 @@
 """Vision transformer modules. https://docs.kidger.site/equinox/examples/vision_transformer/"""
+
 import functools
 
 import einops  # https://github.com/arogozhnikov/einops
@@ -276,20 +277,26 @@ optimizer = optax.adamw(
 
 state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
-# model, state, losses = train(model, optimizer, state, dataloader(config), num_steps, key=key)
+if __name__ == '__main__':
+    from rich.prompt import Confirm
 
-# eqx.tree_serialise_leaves('models/vit_num_elems1.eqx', model)
+    if Confirm.ask('Train from scratch?'):
+        model, state, losses = train(
+            model, optimizer, state, dataloader(config), num_steps, key=key
+        )
 
-model = eqx.tree_deserialise_leaves('models/vit_num_elems1.eqx', model)
+        eqx.tree_serialise_leaves('models/vit_num_elems1.eqx', model)
+    else:
+        model = eqx.tree_deserialise_leaves('models/vit_num_elems1.eqx', model)
 
-accuracies = []
-for batch in dataloader(config, split='test'):
-    dens_img = einops.rearrange(
-        batch['density'], 'batch (h w c) -> batch h w c', h=height, w=width, c=channels
-    )
-    logits = jax.vmap(model, in_axes=(0, None, None))(dens_img, False, key)
-    predictions = jnp.argmax(logits, axis=-1)
-    accuracy = jnp.mean(predictions == batch['n_elements_label'])
-    accuracies.append(accuracy)
+    accuracies = []
+    for batch in dataloader(config, split='test'):
+        dens_img = einops.rearrange(
+            batch['density'], 'batch (h w c) -> batch h w c', h=height, w=width, c=channels
+        )
+        logits = jax.vmap(model, in_axes=(0, None, None))(dens_img, False, key)
+        predictions = jnp.argmax(logits, axis=-1)
+        accuracy = jnp.mean(predictions == batch['n_elements_label'])
+        accuracies.append(accuracy)
 
-print(f'Accuracy: {np.sum(accuracies) / len(accuracies) * 100}%')
+    print(f'Accuracy: {np.sum(accuracies) / len(accuracies) * 100}%')

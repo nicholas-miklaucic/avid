@@ -1,6 +1,6 @@
 batch_size = 208
 
-[data_encoder]
+[voxelizer]
 n_grid = 24
 distance_power = 2.0
 eff_scale = 0.7
@@ -8,10 +8,11 @@ num_cells = 4
 
 [data]
 data_batch_size = 52
+raw_data_folder = "data"
 data_folder = "precomputed"
 train_split = 6
-test_split = 1
-valid_split = 0
+test_split = 0
+valid_split = 1
 
 [cli]
 verbosity = "info"

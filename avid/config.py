@@ -9,7 +9,7 @@ pyrallis.set_config_type('toml')
 
 
 @dataclass
-class DataEncoderConfig:
+class VoxelizerConfig:
     """Controls how crystals are encoded into a grid."""
 
     # The grid size per axis.
@@ -40,15 +40,18 @@ class DataConfig:
     # value that I've picked to make even batches.
     data_batch_size: int = 52
 
-    # Folder of dataset.
+    # Folder of raw data files.
+    raw_data_folder: Path = Path('data/')
+
+    # Folder of processed data files.
     data_folder: Path = Path('precomputed/')
 
     # Train split.
     train_split: int = 6
     # Test split.
-    test_split: int = 1
+    test_split: int = 0
     # Valid split:
-    valid_split: int = 0
+    valid_split: int = 1
 
 
 class LoggingLevel(Enum):
@@ -91,7 +94,7 @@ class MainConfig:
     # The batch size. Should be a multiple of data_batch_size to make data loading simple.
     batch_size: int = 52 * 4
 
-    data_encoder: DataEncoderConfig = field(default_factory=DataEncoderConfig)
+    voxelizer: VoxelizerConfig = field(default_factory=VoxelizerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     cli: CLIConfig = field(default_factory=CLIConfig)
 

@@ -1,17 +1,43 @@
 """Code to load the processed data."""
+
 from typing import Literal
+from einops import rearrange
 import numpy as np
 import jax
 import jax.numpy as jnp
 import equinox as eqx
 import pyrallis
 
-from avid.config import CLIConfig, DataConfig, DataEncoderConfig, LoggingLevel, MainConfig
-from avid.utils import _debug_structure, debug_structure
+from avid.config import CLIConfig, DataConfig, VoxelizerConfig, LoggingLevel, MainConfig
+from avid.metadata import Metadata
+from avid.utils import ELEM_VALS, _debug_structure, debug_structure
+
+from jaxtyping import Float, Array
+
+n_elems = len(ELEM_VALS)
 
 
-def dataloader(config: MainConfig, split: Literal['train', 'test', 'valid'] = 'train'):
-    """Returns a generator that produces batches to train on."""
+class DataBatch(eqx.Module):
+    """A batch of data."""
+
+    density: Float[Array, 'batch n_grid n_grid n_grid n_spec']
+    e_form: Float[Array, 'batch']
+    lat_abc_angles: Float[Array, 'batch 6']
+
+    @classmethod
+    def new_empty(batch_size: int, n_grid: int, n_spec: int):
+        return DataBatch(
+            jnp.empty((batch_size, n_grid, n_grid, n_grid, n_spec)),
+            jnp.empty((batch_size,)),
+            jnp.empty((batch_size, 6)),
+        )
+
+
+def dataloader(
+    config: MainConfig, split: Literal['train', 'test', 'valid'] = 'train', infinite: bool = False
+):
+    """Returns a generator that produces batches to train on. If infinite, repeats forever: otherwise, stops when all data has been yielded."""
+    ngrid = config.voxelizer.n_grid
     data_folder = config.data.data_folder
     files = sorted(list(data_folder.glob('densities/*.eqx')))
 
@@ -26,16 +52,14 @@ def dataloader(config: MainConfig, split: Literal['train', 'test', 'valid'] = 't
 
     data_templ = {
         'density': jnp.empty(
-            (config.data.data_batch_size, config.data_encoder.n_points), dtype=jnp.float32
-        ),
-        'species': jnp.empty(
-            (config.data.data_batch_size, config.data_encoder.n_points), dtype=jnp.int16
+            (config.data.data_batch_size, config.voxelizer.n_points, n_elems),
+            dtype=jnp.float32,
         ),
     }
 
-    e_form_templ = jnp.empty(len(files) * config.data.data_batch_size, dtype=jnp.float32)
-    e_forms = eqx.tree_deserialise_leaves(data_folder / 'e_forms.eqx', e_form_templ)
-    e_forms = e_forms.reshape(config.data.data_batch_size, len(files))
+    metadata: Metadata = eqx.tree_deserialise_leaves(
+        data_folder / 'metadata.eqx', Metadata.new_empty(len(files), config.data.data_batch_size)
+    )
 
     # data = [eqx.tree_deserialise_leaves(file, data_templ) for file in files]
 
@@ -47,21 +71,31 @@ def dataloader(config: MainConfig, split: Literal['train', 'test', 'valid'] = 't
             np.random.permutation(split_idx), len(split_idx) // config.train_batch_multiple
         )
         for batch in batch_inds:
-            data_batch = {'density': [], 'species': [], 'e_form': []}
+            data_batch = {'density': []}
             for i in batch:
                 data = eqx.tree_deserialise_leaves(files[i], data_templ)
-                for key in data_batch:
-                    if key in data:
-                        data_batch[key].append(data[key])
-                    elif key == 'e_form':
-                        data_batch[key].append(e_forms[:, i].reshape(-1, 1))
+                data_batch['density'].append(
+                    rearrange(
+                        data['density'],
+                        'bs (nx ny nz) nspec -> bs nx ny nz nspec',
+                        bs=config.data.data_batch_size,
+                        nx=ngrid,
+                        ny=ngrid,
+                        nz=ngrid,
+                        nspec=n_elems,
+                    )
+                )
 
             for key in data_batch:
                 data_batch[key] = jnp.vstack(data_batch[key])
 
-            data_batch['n_elements_label'] = num_elements_class(data_batch)
+            data_batch['e_form'] = metadata.e_form[jnp.array(batch)]
+            data_batch['lat_abc_angles'] = metadata.lat_abc_angles[jnp.array(batch)]
 
-            yield data_batch
+            for meta_key in ('e_form', 'lat_abc_angles'):
+                data_batch[meta_key] = jnp.concatenate(data_batch[meta_key], axis=0)
+
+            yield DataBatch(**data_batch)
 
         if split != 'train':
             break

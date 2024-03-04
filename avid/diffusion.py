@@ -84,7 +84,7 @@ def main(
     key = jr.PRNGKey(seed)
     model_key, train_key, loader_key, sample_key = jr.split(key, 4)
 
-    h = w = d = config.data_encoder.n_grid
+    h = w = d = config.voxelizer.n_grid
 
     int_beta = lambda t: t  # Try experimenting with other options here!
     weight = lambda t: 1 - jnp.exp(-int_beta(t))  # Just chosen to upweight the region near t=0.
@@ -160,7 +160,7 @@ if __name__ == '__main__':
     if Confirm.ask('Run diffusion?'):
         main(config)
     else:
-        h = w = d = config.data_encoder.n_grid
+        h = w = d = config.voxelizer.n_grid
         model = UNet(
             data_shape=(1, h, w, d),
             is_biggan=False,

@@ -97,7 +97,7 @@ def dataloader(
 
             yield DataBatch(**data_batch)
 
-        if split != 'train':
+        if not infinite:
             break
 
 

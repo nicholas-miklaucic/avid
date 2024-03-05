@@ -12,6 +12,10 @@ pyrallis.set_config_type('toml')
 class VoxelizerConfig:
     """Controls how crystals are encoded into a grid."""
 
+    # The max number of species in a single sample. Due to batching, this affects performance and
+    # memory consumption.
+    max_unique_species: int = 5
+
     # The grid size per axis.
     n_grid: int = 24
 
@@ -73,9 +77,11 @@ class CLIConfig:
 
     def set_up_logging(self):
         from rich.logging import RichHandler
-        from rich.pretty import install
+        from rich.pretty import install as pretty_install
+        from rich.traceback import install as traceback_install
 
-        install()
+        pretty_install()
+        traceback_install()
 
         logging.basicConfig(
             level=self.verbosity.value,
@@ -108,6 +114,8 @@ class MainConfig:
                     self.batch_size, self.data.data_batch_size
                 )
             )
+
+        self.cli.set_up_logging()
 
     @property
     def train_batch_multiple(self) -> int:

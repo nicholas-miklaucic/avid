@@ -1,6 +1,7 @@
 batch_size = 208
 
 [voxelizer]
+max_unique_species = 6
 n_grid = 24
 distance_power = 2.0
 eff_scale = 0.7

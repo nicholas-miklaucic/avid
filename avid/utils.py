@@ -3,21 +3,32 @@
 from abc import ABCMeta
 from json import dumps
 import logging
+from types import MappingProxyType
 import jax.numpy as jnp
 import jax
+from jaxtyping import jaxtyped
 import numpy as np
 import equinox as eqx
 from pymatgen.core import Element
 from dataclasses import asdict, is_dataclass
+import rich
 from rich.pretty import pprint
-from rich import print_json, print
+from rich import print_json
 from rich.tree import Tree
 from rich.style import Style
+from beartype import beartype as typechecker
+from functools import partial
+import flax.linen as nn
+import re
+import humanize
 
 
 ELEM_VALS = 'Li Be B N O F Na Mg Al Si S K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Rb Sr Y Zr Nb Mo Ru Rh Pd Ag Cd In Sn Sb Te Cs Ba La Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi'.split(
     ' '
 )
+
+
+tcheck = partial(jaxtyped, typechecker=typechecker)
 
 
 def val_to_elem(val: int) -> str:
@@ -69,7 +80,7 @@ class StructureVisitor(AbstractTreeVisitor):
         return f'{arr.dtype}{list(arr.shape)}'
 
     def scalar(self, x: int | float):
-        return f'{type(x)}=' + str(x)[:3]
+        return f'{x.__class__.__name__}=' + str(x)[:3]
 
     def np_arr(self, arr: np.ndarray):
         return f'np{list(arr.shape)}'
@@ -122,8 +133,13 @@ def tree_traverse(visitor: AbstractTreeVisitor, obj, max_depth=2):
         if max_depth == 0:
             return '{...}'
         else:
-            return {k: tree_traverse(visitor, v, max_depth - 1) for k, v in obj.items()}
-    elif isinstance(obj, eqx.Module) or is_dataclass(obj):
+            excluded = (('parent', None), ('name', None))
+            return {
+                k: tree_traverse(visitor, v, max_depth - 1)
+                for k, v in obj.items()
+                if (k, v) not in excluded
+            }
+    elif is_dataclass(obj):
         return {obj.__class__.__name__: tree_traverse(visitor, asdict(obj), max_depth)}
     else:
         return obj.__class__.__name__
@@ -134,22 +150,17 @@ def show_obj(obj):
     for k, v in obj.items():
         tree = Tree(label=k, style=STYLES[0])
         tree_from_dict(tree, v, depth=1)
-        print(tree)
+        rich.print(tree)
 
 
 def _debug_structure(tree_depth=2, **kwargs):
     """Prints out the structure of the inputs."""
-    show_obj(
-        {
-            f'{k} structure': tree_traverse(StructureVisitor(), v, tree_depth)
-            for k, v in kwargs.items()
-        }
-    )
+    show_obj({f'{k}': tree_traverse(StructureVisitor(), v, tree_depth) for k, v in kwargs.items()})
 
 
 def _debug_stat(tree_depth=2, **kwargs):
     """Prints out a reduction of the inputs. Is almost the mean, but with a small fudge factor so differently-shaped arrays will have different summaries."""
-    show_obj({f'{k} stat': tree_traverse(StatVisitor(), v, tree_depth) for k, v in kwargs.items()})
+    show_obj({f'{k}': tree_traverse(StatVisitor(), v, tree_depth) for k, v in kwargs.items()})
 
 
 def debug_structure(**kwargs):
@@ -160,3 +171,41 @@ def debug_structure(**kwargs):
 def debug_stat(**kwargs):
     """Prints out a reduction of the inputs. Is almost the mean, but with a small fudge factor so differently-shaped arrays will have different summaries."""
     jax.debug.callback(_debug_stat, **kwargs)
+
+
+def flax_summary(
+    mod: nn.Module,
+    *args,
+    compute_flops=True,
+    compute_vjp_flops=False,
+    console_kwargs=None,
+    table_kwargs=MappingProxyType({'safe_box': False, 'expand': True, 'box': rich.box.SIMPLE}),
+    column_kwargs=MappingProxyType({'justify': 'right'}),
+    show_repeated=False,
+    depth=None,
+    **kwargs,
+):
+    tabulate_fn = nn.tabulate(
+        mod,
+        jax.random.key(0),
+        compute_flops=compute_flops,
+        compute_vjp_flops=compute_vjp_flops,
+        console_kwargs=console_kwargs,
+        table_kwargs=table_kwargs,
+        column_kwargs=column_kwargs,
+        show_repeated=show_repeated,
+        depth=depth,
+    )
+    out = tabulate_fn(*args, **kwargs)
+
+    # hack to control numbers so they're formatted reasonably
+    # 12580739072 flops is not very helpful
+
+    def human_units(m: re.Match):
+        """Format using units, preserving the length with spaces."""
+        human = humanize.metric(int(m.group(0))).replace(' ', '')
+        pad_num = len(m.group(0)) - len(human)
+        return ' ' * pad_num + human
+
+    out = re.sub(r'\d' * 6 + '+', human_units, out)
+    print(out)

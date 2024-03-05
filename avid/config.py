@@ -73,6 +73,9 @@ class CLIConfig:
 
     def set_up_logging(self):
         from rich.logging import RichHandler
+        from rich.pretty import install
+
+        install()
 
         logging.basicConfig(
             level=self.verbosity.value,

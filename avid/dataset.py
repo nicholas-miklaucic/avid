@@ -33,6 +33,32 @@ class DataBatch(eqx.Module):
         )
 
 
+def load_file(config: MainConfig, file_num: int):
+    """Loads a file. Lacks the complex data loader logic, but easier to use for testing."""
+    data_folder = config.data.data_folder
+    fn = data_folder / 'densities' / f'batch{file_num}.eqx'
+    num_files = len(list(data_folder.glob('densities/*.eqx')))
+
+    data_templ = {
+        'density': jnp.empty(
+            (config.data.data_batch_size, config.voxelizer.n_points, n_elems),
+            dtype=jnp.float32,
+        ),
+    }
+
+    metadata: Metadata = eqx.tree_deserialise_leaves(
+        data_folder / 'metadata.eqx', Metadata.new_empty(num_files, config.data.data_batch_size)
+    )
+
+    # data = [eqx.tree_deserialise_leaves(file, data_templ) for file in files]
+
+    data = eqx.tree_deserialise_leaves(fn, data_templ)
+
+    data['e_form'] = metadata.e_form[file_num]
+    data['lat_abc_angles'] = metadata.lat_abc_angles[file_num]
+    return DataBatch(**data)
+
+
 def dataloader(
     config: MainConfig, split: Literal['train', 'test', 'valid'] = 'train', infinite: bool = False
 ):
@@ -114,6 +140,10 @@ def num_elements_class(batch):
 if __name__ == '__main__':
     config = pyrallis.parse(config_class=MainConfig)
     config.cli.set_up_logging()
+
+    f1 = load_file(config, 300)
+    debug_structure(conf=f1)
+    jax.debug.print('Batch: {}', f1)
 
     debug_structure(conf=next(dataloader(config)))
     jax.debug.print('Batch: {}', next(dataloader(config)))

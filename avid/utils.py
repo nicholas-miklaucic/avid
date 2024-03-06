@@ -16,7 +16,7 @@ from rich.pretty import pprint
 from rich import print_json
 from rich.tree import Tree
 from rich.style import Style
-from beartype import beartype as typechecker
+from beartype import BeartypeConf, beartype as typechecker
 from functools import partial
 import flax.linen as nn
 import re
@@ -28,7 +28,8 @@ ELEM_VALS = 'Li Be B N O F Na Mg Al Si S K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge
 )
 
 
-tcheck = partial(jaxtyped, typechecker=typechecker)
+# checker = typechecker(conf=BeartypeConf(is_color=False))
+tcheck = partial(jaxtyped, typechecker=None)
 
 
 def val_to_elem(val: int) -> str:
@@ -179,16 +180,20 @@ def _debug_stat(tree_depth=5, **kwargs):
     show_obj({f'{k}': tree_traverse(StatVisitor(), v, tree_depth) for k, v in kwargs.items()})
 
 
-def debug_structure(**kwargs):
-    """Prints out the structure of the inputs."""
-    jax.debug.callback(_debug_structure, **kwargs)
-    return list(kwargs.values())[0]
+def debug_structure(*args, **kwargs):
+    """Prints out the structure of the inputs. Returns first argument."""
+    new_kwargs = {f'arg{i}': arg for i, arg in enumerate(args)}
+    new_kwargs.update(**kwargs)
+    jax.debug.callback(_debug_structure, **new_kwargs)
+    return list(new_kwargs.values())[0]
 
 
-def debug_stat(**kwargs):
-    """Prints out a reduction of the inputs. Is almost the mean, but with a small fudge factor so differently-shaped arrays will have different summaries."""
-    jax.debug.callback(_debug_stat, **kwargs)
-    return list(kwargs.values())[0]
+def debug_stat(*args, **kwargs):
+    """Prints out a reduction of the inputs. Is almost the mean, but with a small fudge factor so differently-shaped arrays will have different summaries. Returns first argument."""
+    new_kwargs = {f'arg{i}': arg for i, arg in enumerate(args)}
+    new_kwargs.update(**kwargs)
+    jax.debug.callback(_debug_stat, **new_kwargs)
+    return list(new_kwargs.values())[0]
 
 
 def flax_summary(

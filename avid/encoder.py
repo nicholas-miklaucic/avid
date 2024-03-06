@@ -50,7 +50,7 @@ class ReduceSpeciesEmbed(nn.Module):
 
         x = jax.lax.collapse(data.density, 1, 4)
         nx, ny, nz = data.density.shape[1:4]
-        debug_structure(x=x, spec=data.species, mask=data.mask)
+        # debug_structure(x=x, spec=data.species, mask=data.mask)
         return rearrange(
             jax.vmap(spec2, in_axes=(1, None, None), out_axes=1)(x, data.species, data.mask).sum(
                 axis=-1

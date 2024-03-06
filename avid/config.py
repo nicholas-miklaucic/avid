@@ -1,6 +1,9 @@
 from enum import Enum
 import logging
-from dataclasses import dataclass
+from flax.struct import dataclass
+from typing import Literal
+from jax import Device
+import jax
 import pyrallis
 from pyrallis import field
 from pathlib import Path
@@ -99,13 +102,26 @@ class CLIConfig:
 
 
 @dataclass
+class DeviceConfig:
+    device: str = 'gpu'
+
+    @property
+    def jax_devices(self):
+        return jax.devices(self.device)
+
+
+@dataclass
 class MainConfig:
     # The batch size. Should be a multiple of data_batch_size to make data loading simple.
-    batch_size: int = 52 * 4
+    batch_size: int = 52 * 1
+
+    # Use profiling.
+    do_profile: bool = False
 
     voxelizer: VoxelizerConfig = field(default_factory=VoxelizerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     cli: CLIConfig = field(default_factory=CLIConfig)
+    device: DeviceConfig = field(default_factory=DeviceConfig)
 
     def __post_init__(self):
         if self.batch_size % self.data.data_batch_size != 0:

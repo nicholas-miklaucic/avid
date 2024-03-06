@@ -1,5 +1,10 @@
 """Code to load the processed data."""
 
+from functools import partial
+import os
+
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
+
 from collections import defaultdict
 from typing import Literal, Optional
 from einops import rearrange
@@ -95,7 +100,7 @@ def load_file(config: MainConfig, file_num=0):
     return DataBatch(**data)
 
 
-def dataloader(
+def dataloader_base(
     config: MainConfig, split: Literal['train', 'test', 'valid'] = 'train', infinite: bool = False
 ):
     """Returns a generator that produces batches to train on. If infinite, repeats forever: otherwise, stops when all data has been yielded."""
@@ -117,17 +122,43 @@ def dataloader(
     split_idx = split_idx[split_inds[split_idx % total] == split_i]
 
     yield len(split_idx) // config.train_batch_multiple
-    while True:
+
+    split_files = np.array([None for _ in range(len(files))])
+
+    batch_inds = np.split(
+        np.random.permutation(split_idx),
+        len(split_idx) // config.train_batch_multiple,
+    )
+
+    # debug_structure(splidx=split_idx, bi0=batch_inds[0], bi=batch_inds)
+
+    device = config.device.jax_devices[0]
+
+    with jax.default_device(jax.devices('cpu')[0]):
+        for batch in batch_inds:
+            split_files[batch] = [load_file(config, i) for i in batch]
+
+            batch_data = split_files[batch]
+            collated = jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
+            yield jax.device_put(collated, device)
+
+    while infinite:
         batch_inds = np.split(
-            np.random.permutation(split_idx), len(split_idx) // config.train_batch_multiple
+            np.random.permutation(split_idx),
+            len(split_idx) // config.train_batch_multiple,
         )
         for batch in batch_inds:
-            batch_data = [load_file(config, i) for i in batch]
+            batch_data = [split_files[i] for i in batch]
+            collated = jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
+            yield jax.device_put(collated, device)
 
-            yield jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
 
-        if not infinite:
-            break
+def dataloader(
+    config: MainConfig, split: Literal['train', 'test', 'valid'] = 'train', infinite: bool = False
+):
+    dl = dataloader_base(config, split, infinite)
+    steps_per_epoch = next(dl)
+    return (steps_per_epoch, dl)
 
 
 def num_elements_class(batch):
@@ -146,7 +177,16 @@ if __name__ == '__main__':
 
     f1 = load_file(config, 300)
     debug_structure(conf=f1)
-    jax.debug.print('Batch: {}', f1)
 
-    debug_structure(conf=next(dataloader(config)))
-    jax.debug.print('Batch: {}', next(dataloader(config)))
+    from tqdm import tqdm
+
+    steps_per_epoch, dl = dataloader(config, split='valid', infinite=True)
+
+    means = []
+    for _i in tqdm(np.arange(steps_per_epoch * 2)):
+        batch = next(dl)
+        means.append(batch.density.mean())
+
+    print(jnp.mean(jnp.array(means)))
+
+    debug_structure(conf=next(dl))

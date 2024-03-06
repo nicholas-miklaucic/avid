@@ -1,0 +1,13 @@
+batch_size = 52
+
+[data]
+train_split = 2
+test_split = 23
+valid_split = 1
+
+[cli]
+verbosity = "info"
+show_progress = true
+
+[device]
+device = "gpu"

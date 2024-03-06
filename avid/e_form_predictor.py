@@ -9,6 +9,12 @@ from jaxtyping import Float, Array, Int, Bool
 from flax import linen as nn
 import pyrallis
 from rich.prompt import Confirm
+from clu import metrics
+from flax.training import train_state, orbax_utils
+from flax import struct
+import optax
+import orbax
+import orbax.checkpoint as ocp
 
 from avid.config import MainConfig
 from avid.coord_embeddings import legendre_embed, legendre_grid_embeds
@@ -188,7 +194,7 @@ class ViTRegressor(nn.Module):
     patch_latent_dim: int = 32
     pos_latent_dim: int = 16
     max_grid: int = 24
-    species_embed_head_inner_dims: tuple[int] = (32,)
+    species_embed_head_inner_dims: tuple[int] = (24,)
     species_embed_dim: int = 16
     species_embed_dim_out: int = 8
     downsample_factors: tuple[int] = (2,)
@@ -254,13 +260,6 @@ class ViTRegressor(nn.Module):
         return out
 
 
-from clu import metrics
-from flax.training import train_state, orbax_utils
-from flax import struct
-import optax
-import orbax
-
-
 @struct.dataclass
 class Metrics(metrics.Collection):
     loss: metrics.Average.from_output('loss')
@@ -298,89 +297,124 @@ def train_step(state: nn.Module, batch: DataBatch, rng):
 
 
 @jax.jit
-def compute_metrics(*, state, batch: DataBatch):
-    preds = state.apply_fn(params, batch, training=False).squeeze()
+def compute_metrics(*, state: TrainState, batch: DataBatch):
+    preds = state.apply_fn(state.params, batch, training=False).squeeze()
 
     loss = optax.losses.l2_loss(preds, targets=batch.e_form).mean()
-    metric_updates = state.metrics.single_from_model_output(
-        preds=preds, targets=batch.e_form, loss=loss
-    )
+    metric_updates = state.metrics.single_from_model_output(loss=loss)
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
     return state
 
 
+class TrainingRun:
+    def __init__(self, config: MainConfig):
+        self.config = MainConfig
+        self.orbax_checkpointer = ocp.PyTreeCheckpointer()
+        options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=2, create=True)
+        self.mngr = orbax.checkpoint.CheckpointManager(
+            ocp.test_utils.create_empty('/tmp/ckpt/'), options=options
+        )
+
+        self.rng = jax.random.key(27182)
+        self.state = create_train_state(ViTRegressor(), self.rng, 1e-3)
+
+        self.metrics_history = {
+            'train_loss': [],
+            'test_loss': [],
+        }
+
+        self.num_epochs = 10
+        self.steps_in_epoch, self.dl = dataloader(config, split='train', infinite=True)
+        self.steps_in_test_epoch, self.test_dl = dataloader(config, split='valid', infinite=True)
+        self.num_steps = self.steps_in_epoch * self.num_epochs
+        self.steps = range(self.num_steps)
+        self.curr_step = 0
+
+    def next_step(self):
+        return self.step(self.curr_step + 1, next(self.dl))
+
+    def step(self, step, batch):
+        self.curr_step = step
+        if step >= self.num_steps:
+            return None
+
+        self.state = train_step(
+            self.state, batch, self.rng
+        )  # get updated train state (which contains the updated parameters)
+        self.state = compute_metrics(state=self.state, batch=batch)  # aggregate batch metrics
+
+        if (step + 1) % self.steps_in_epoch == 0:  # one training epoch has passed
+            for metric, value in self.state.metrics.compute().items():  # compute metrics
+                self.metrics_history[f'train_{metric}'].append(value.item())  # record metrics
+            self.state = self.state.replace(
+                metrics=self.state.metrics.empty()
+            )  # reset train_metrics for next training epoch
+
+            # Compute metrics on the test set after each training epoch
+            self.test_state = self.state
+            for _i, test_batch in zip(range(self.steps_in_test_epoch), self.test_dl):
+                self.test_state = compute_metrics(state=self.test_state, batch=test_batch)
+
+            for metric, value in self.test_state.metrics.compute().items():
+                self.metrics_history[f'test_{metric}'].append(value.item())
+
+        return self
+
+    def step_until_done(self):
+        for step, batch in zip(self.steps, self.dl):
+            yield self.step(step, batch)
+
+    def run_to_completion(self):
+        for step, batch in zip(self.steps, self.dl):
+            self.step(step, batch)
+
+    @property
+    def epoch_just_finished(self):
+        return (self.curr_step + 1) % self.steps_in_epoch == 0
+
+
 if __name__ == '__main__':
-    config = pyrallis.argparsing.parse(MainConfig, 'configs/defaults.toml')
+    config = pyrallis.argparsing.parse(MainConfig, 'configs/smoke_test.toml')
+    from rich.pretty import pprint
+    import rich.progress as prog
+
+    # with jax.profiler.trace('/tmp/jax-trace', create_perfetto_link=True):
+    # if config.do_profile:
+    #     jax.profiler.start_trace('/tmp/jax-trace', create_perfetto_link=True)
+
+    # run = TrainingRun(config)
+    # update_every = 1
+    # with prog.Progress(
+    #     prog.TextColumn('[progress.description]{task.description}'),
+    #     prog.BarColumn(80, 'light_pink3', 'deep_sky_blue4', 'green'),
+    #     prog.MofNCompleteColumn(),
+    #     prog.TimeElapsedColumn(),
+    #     prog.TimeRemainingColumn(),
+    #     prog.SpinnerColumn(),
+    #     refresh_per_second=3,
+    #     disable=not config.cli.show_progress,
+    # ) as progress:
+    #     task = progress.add_task(
+    #         '[bold] [deep_pink3] Training [/deep_pink3] [/bold]',
+    #         total=run.num_steps // update_every,
+    #     )
+    #     for run_state in run.step_until_done():
+    #         if run_state.curr_step % update_every == 0:
+    #             progress.advance(task)
+
+    #         if run_state.epoch_just_finished:
+    #             pprint(run_state.metrics_history)
+
+    # if config.do_profile:
+    #     jax.profiler.stop_trace()
+
     # if not Confirm.ask('Train?'):
     #     raise ValueError('Aborted')
 
     kwargs = dict(training=False)
     batch = load_file(config, 0)
-
     mod = ViTRegressor()
     out, params = mod.init_with_output(jax.random.key(0), im=batch, **kwargs)
-
     debug_structure(batch=batch, module=mod, out=out)
     flax_summary(mod, batch, **kwargs)
-
-    import orbax.checkpoint as ocp
-
-    orbax_checkpointer = ocp.PyTreeCheckpointer()
-    options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=2, create=True)
-    mngr = orbax.checkpoint.CheckpointManager(
-        ocp.test_utils.create_empty('/tmp/ckpt/'), options=options
-    )
-
-    rng = jax.random.key(271828)
-    state = create_train_state(ViTRegressor(), rng, 1e-3)
-
-    metrics_history = {
-        'train_loss': [],
-        'train_accuracy': [],
-        'test_loss': [],
-        'test_accuracy': [],
-    }
-
-    num_epochs = 10
-    dl = dataloader(config, split='train', infinite=True)
-    test_dl = dataloader(config, split='valid')
-    _num_test = next(test_dl)
-    steps_in_epoch = next(dl)
-    num_steps = steps_in_epoch * num_epochs
-    for step, batch in zip(range(num_steps), dl):
-        # Run optimization steps over training batches and compute batch metrics
-        state = train_step(
-            state, batch, rng
-        )  # get updated train state (which contains the updated parameters)
-        state = compute_metrics(state=state, batch=batch)  # aggregate batch metrics
-
-        if (step + 1) % steps_in_epoch == 0:  # one training epoch has passed
-            for metric, value in state.metrics.compute().items():  # compute metrics
-                metrics_history[f'train_{metric}'].append(value)  # record metrics
-            state = state.replace(
-                metrics=state.metrics.empty()
-            )  # reset train_metrics for next training epoch
-
-            # Compute metrics on the test set after each training epoch
-            test_state = state
-            for test_batch in test_dl:
-                test_state = compute_metrics(state=test_state, batch=test_batch)
-
-            for metric, value in test_state.metrics.compute().items():
-                metrics_history[f'test_{metric}'].append(value)
-
-            print(
-                f"train epoch: {(step+1) // steps_in_epoch}, "
-                f"loss: {metrics_history['train_loss'][-1]}, "
-                f"accuracy: {metrics_history['train_accuracy'][-1] * 100}"
-            )
-            print(
-                f"test epoch: {(step+1) // steps_in_epoch}, "
-                f"loss: {metrics_history['test_loss'][-1]}, "
-                f"accuracy: {metrics_history['test_accuracy'][-1] * 100}"
-            )
-
-            ckpt = {'model': state, 'config': config, 'metrics': metrics_history}
-            mngr.save(0, args=ocp.args.StandardSave(ckpt))
-            mngr.wait_until_finished()

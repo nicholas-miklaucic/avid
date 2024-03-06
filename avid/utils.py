@@ -107,17 +107,22 @@ KWARGS[0]['bold'] = True
 STYLES = [Style(**kwargs) for kwargs in KWARGS]
 
 
-def tree_from_dict(base, obj, depth=0):
+def tree_from_dict(base: Tree, obj, depth=0, collapse_single=True):
     style = STYLES[depth % len(STYLES)]
     if isinstance(obj, dict):
-        for k, v in obj.items():
-            child = base.add(k, style=style)
-            tree_from_dict(child, v, depth + 1)
+        if len(obj) == 1:
+            k, v = next(iter(obj.items()))
+            base.label = base.label + ' >>> ' + k
+            tree_from_dict(base, v, depth)
+        else:
+            for k, v in obj.items():
+                child = base.add(k, style=style)
+                tree_from_dict(child, v, depth + 1)
     else:
         base.add(obj, style=style)
 
 
-def tree_traverse(visitor: AbstractTreeVisitor, obj, max_depth=2):
+def tree_traverse(visitor: AbstractTreeVisitor, obj, max_depth=2, collapse_single=True):
     if isinstance(obj, jax.Array):
         return visitor.jax_arr(obj)
     elif isinstance(obj, np.ndarray):
@@ -126,39 +131,50 @@ def tree_traverse(visitor: AbstractTreeVisitor, obj, max_depth=2):
         if max_depth == 0:
             return '[...]'
         else:
-            return [tree_traverse(visitor, child, max_depth - 1) for child in obj]
+            if collapse_single and len(obj) == 1:
+                new_depth = max_depth
+            else:
+                new_depth = max_depth - 1
+
+            return {str(i): tree_traverse(visitor, child, new_depth) for i, child in enumerate(obj)}
     elif isinstance(obj, (float, int)):
         return visitor.scalar(obj)
     elif isinstance(obj, dict):
         if max_depth == 0:
             return '{...}'
         else:
+            if collapse_single and len(obj) == 1:
+                new_depth = max_depth
+            else:
+                new_depth = max_depth - 1
+
             excluded = (('parent', None), ('name', None))
             return {
-                k: tree_traverse(visitor, v, max_depth - 1)
+                k: tree_traverse(visitor, v, new_depth)
                 for k, v in obj.items()
                 if (k, v) not in excluded
             }
     elif is_dataclass(obj):
         return {obj.__class__.__name__: tree_traverse(visitor, asdict(obj), max_depth)}
     else:
-        return obj.__class__.__name__
+        name = getattr(obj, '__name__', '|')
+        return f'{obj.__class__.__name__}={name}'
 
 
 def show_obj(obj):
     # print_json(data=obj)
     for k, v in obj.items():
         tree = Tree(label=k, style=STYLES[0])
-        tree_from_dict(tree, v, depth=1)
+        tree_from_dict(tree, v)
         rich.print(tree)
 
 
-def _debug_structure(tree_depth=2, **kwargs):
+def _debug_structure(tree_depth=5, **kwargs):
     """Prints out the structure of the inputs."""
     show_obj({f'{k}': tree_traverse(StructureVisitor(), v, tree_depth) for k, v in kwargs.items()})
 
 
-def _debug_stat(tree_depth=2, **kwargs):
+def _debug_stat(tree_depth=5, **kwargs):
     """Prints out a reduction of the inputs. Is almost the mean, but with a small fudge factor so differently-shaped arrays will have different summaries."""
     show_obj({f'{k}': tree_traverse(StatVisitor(), v, tree_depth) for k, v in kwargs.items()})
 
@@ -166,18 +182,20 @@ def _debug_stat(tree_depth=2, **kwargs):
 def debug_structure(**kwargs):
     """Prints out the structure of the inputs."""
     jax.debug.callback(_debug_structure, **kwargs)
+    return list(kwargs.values())[0]
 
 
 def debug_stat(**kwargs):
     """Prints out a reduction of the inputs. Is almost the mean, but with a small fudge factor so differently-shaped arrays will have different summaries."""
     jax.debug.callback(_debug_stat, **kwargs)
+    return list(kwargs.values())[0]
 
 
 def flax_summary(
     mod: nn.Module,
     *args,
     compute_flops=True,
-    compute_vjp_flops=False,
+    compute_vjp_flops=True,
     console_kwargs=None,
     table_kwargs=MappingProxyType({'safe_box': False, 'expand': True, 'box': rich.box.SIMPLE}),
     column_kwargs=MappingProxyType({'justify': 'right'}),

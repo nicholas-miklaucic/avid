@@ -34,15 +34,17 @@ class DataBatch(eqx.Module):
     lat_abc_angles: Float[Array, 'batch 6']
 
     @classmethod
-    def new_empty(batch_size: int, n_grid: int, n_spec: int):
+    def new_empty(cls, batch_size: int, n_grid: int, max_spec: int):
         return DataBatch(
-            jnp.empty((batch_size, n_grid, n_grid, n_grid, n_spec)),
-            jnp.empty((batch_size,)),
+            jnp.empty((batch_size, n_grid, n_grid, n_grid, max_spec)),
+            jnp.empty((batch_size, max_spec), dtype=jnp.int16),
+            jnp.empty((batch_size, max_spec), dtype=jnp.bool),
+            jnp.empty(batch_size),
             jnp.empty((batch_size, 6)),
         )
 
 
-def load_file(config: MainConfig, file_num: int = 0):
+def load_file(config: MainConfig, file_num=0):
     """Loads a file. Lacks the complex data loader logic, but easier to use for testing."""
     data_folder = config.data.data_folder
     fn = data_folder / 'densities' / f'batch{file_num}.eqx'
@@ -97,7 +99,6 @@ def dataloader(
     config: MainConfig, split: Literal['train', 'test', 'valid'] = 'train', infinite: bool = False
 ):
     """Returns a generator that produces batches to train on. If infinite, repeats forever: otherwise, stops when all data has been yielded."""
-    ngrid = config.voxelizer.n_grid
     data_folder = config.data.data_folder
     files = sorted(list(data_folder.glob('densities/*.eqx')))
 
@@ -115,6 +116,7 @@ def dataloader(
     split_idx = np.arange(len(files))
     split_idx = split_idx[split_inds[split_idx % total] == split_i]
 
+    yield len(split_idx) // config.train_batch_multiple
     while True:
         batch_inds = np.split(
             np.random.permutation(split_idx), len(split_idx) // config.train_batch_multiple

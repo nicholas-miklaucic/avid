@@ -1,4 +1,4 @@
-batch_size = 208
+batch_size = 52
 
 [voxelizer]
 max_unique_species = 6

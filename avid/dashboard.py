@@ -14,8 +14,10 @@ from typing import Any, Mapping, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from h11 import Data
 import jax
 import numpy as np
+import pandas as pd
 import pyrallis
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -23,7 +25,7 @@ from textual.containers import Grid
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Footer, Header, Markdown
+from textual.widgets import Footer, Header, Markdown, DataTable
 from textual.worker import get_current_worker, Worker
 from typing_extensions import Final
 import rho_plus as rp
@@ -130,20 +132,18 @@ class TestRunner(TrainingRun):
 
 
 class Info(Widget):
-    status = reactive('working', layout=True)
+    def __init__(self, dataa={}):
+        super().__init__()
 
-    def status_message(self):
-        if self.status == 'success':
-            return 'Finished! 🎉'
-        elif self.status == 'working':
-            return 'Working...'
-        elif self.status == 'abort':
-            return 'Aborted'
+    def update_data(self, dataa):
+        tab = self.query_one(DataTable)
+        tab.clear(columns=True)
+        df = pd.DataFrame(dataa)
+        tab.add_columns(*df.columns)
+        tab.add_rows(df.map(lambda x: '{:3.02f}'.format(x)).values)
 
-    def render(self):
-        tab = Table()
-        tab.add_row('status', self.status_message())
-        return tab
+    def compose(self):
+        yield DataTable()
 
 
 class Dashboard(App):
@@ -152,7 +152,7 @@ class Dashboard(App):
     CSS = """
     Grid {
         grid-size: 2 1;
-        grid-columns: 4fr 1fr;
+        grid-columns: 3fr 1fr;
     }
 
     Losses {
@@ -195,6 +195,9 @@ class Dashboard(App):
         for plot in self.query(Losses).results(Losses):
             plot.update_data(self.data)
 
+        self.query_one(Info).update_data(self.data)
+        self.refresh(layout=True)
+
     def watch_colors(self) -> None:
         for plot in self.query(Losses).results(Losses):
             plot.update_colors(self.colors)
@@ -204,27 +207,16 @@ class Dashboard(App):
         update_every_step = 1
         for state in run_state.step_until_done():
             if not worker.is_cancelled and state is not None:
-                self.call_from_thread(self.log, run_state)
                 if state.curr_step % update_every_step == 0:
                     self.call_from_thread(self.update_data, state.metrics_history)
             else:
                 break
 
-        self.call_from_thread(self.update_finished, state, worker.is_cancelled)
+        self.call_from_thread(self.refresh, layout=True)
 
     def watch_dark(self, dark: bool) -> None:
         self.colors = rp.matplotlib.DARK_COLORS if dark else rp.matplotlib.LIGHT_COLORS
         return super().watch_dark(dark)
-
-    def update_finished(self, state, cancelled):
-        if cancelled:
-            self.query_one(Info).status = 'abort'
-        elif state is None:
-            self.query_one(Info).status = 'success'
-        else:
-            self.query_one(Info).status = 'working'
-
-        self.log(self.query_one(Info).status)
 
 
 if __name__ == '__main__':

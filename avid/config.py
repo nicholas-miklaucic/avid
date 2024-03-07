@@ -133,6 +133,10 @@ class MainConfig:
 
         self.cli.set_up_logging()
 
+        from jax.experimental.compilation_cache.compilation_cache import set_cache_dir
+
+        set_cache_dir('/tmp/jax_comp_cache')
+
     @property
     def train_batch_multiple(self) -> int:
         """How many files should be loaded per training step."""

@@ -300,7 +300,9 @@ def train_step(state: nn.Module, batch: DataBatch, rng):
 def compute_metrics(*, state: TrainState, batch: DataBatch):
     preds = state.apply_fn(state.params, batch, training=False).squeeze()
 
-    loss = optax.losses.l2_loss(preds, targets=batch.e_form).mean()
+    # l1 loss is just not a thing for some reason?
+    delta = 1e-4
+    loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
     metric_updates = state.metrics.single_from_model_output(loss=loss)
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
@@ -316,7 +318,7 @@ class TrainingRun:
             ocp.test_utils.create_empty('/tmp/ckpt/'), options=options
         )
 
-        self.rng = jax.random.key(27182)
+        self.rng = jax.random.key(2718)
         self.state = create_train_state(ViTRegressor(), self.rng, 1e-3)
 
         self.metrics_history = {
@@ -324,7 +326,7 @@ class TrainingRun:
             'test_loss': [],
         }
 
-        self.num_epochs = 10
+        self.num_epochs = 15
         self.steps_in_epoch, self.dl = dataloader(config, split='train', infinite=True)
         self.steps_in_test_epoch, self.test_dl = dataloader(config, split='valid', infinite=True)
         self.num_steps = self.steps_in_epoch * self.num_epochs
@@ -375,42 +377,9 @@ class TrainingRun:
 
 
 if __name__ == '__main__':
+    from avid.training_runner import run_using_dashboard, run_using_progress
+
     config = pyrallis.argparsing.parse(MainConfig, 'configs/smoke_test.toml')
-    from rich.pretty import pprint
-    import rich.progress as prog
-
-    # with jax.profiler.trace('/tmp/jax-trace', create_perfetto_link=True):
-    # if config.do_profile:
-    #     jax.profiler.start_trace('/tmp/jax-trace', create_perfetto_link=True)
-
-    # run = TrainingRun(config)
-    # update_every = 1
-    # with prog.Progress(
-    #     prog.TextColumn('[progress.description]{task.description}'),
-    #     prog.BarColumn(80, 'light_pink3', 'deep_sky_blue4', 'green'),
-    #     prog.MofNCompleteColumn(),
-    #     prog.TimeElapsedColumn(),
-    #     prog.TimeRemainingColumn(),
-    #     prog.SpinnerColumn(),
-    #     refresh_per_second=3,
-    #     disable=not config.cli.show_progress,
-    # ) as progress:
-    #     task = progress.add_task(
-    #         '[bold] [deep_pink3] Training [/deep_pink3] [/bold]',
-    #         total=run.num_steps // update_every,
-    #     )
-    #     for run_state in run.step_until_done():
-    #         if run_state.curr_step % update_every == 0:
-    #             progress.advance(task)
-
-    #         if run_state.epoch_just_finished:
-    #             pprint(run_state.metrics_history)
-
-    # if config.do_profile:
-    #     jax.profiler.stop_trace()
-
-    # if not Confirm.ask('Train?'):
-    #     raise ValueError('Aborted')
 
     kwargs = dict(training=False)
     batch = load_file(config, 0)
@@ -418,3 +387,6 @@ if __name__ == '__main__':
     out, params = mod.init_with_output(jax.random.key(0), im=batch, **kwargs)
     debug_structure(batch=batch, module=mod, out=out)
     flax_summary(mod, batch, **kwargs)
+
+    run = TrainingRun(config)
+    run_using_dashboard(config, run)

@@ -1,5 +1,6 @@
 batch_size = 52
 do_profile = false
+num_epochs = 4
 
 [data]
 train_split = 2
@@ -12,3 +13,4 @@ show_progress = true
 
 [device]
 device = "gpu"
+max_gpus = 1

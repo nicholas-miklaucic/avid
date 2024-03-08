@@ -11,7 +11,7 @@ from math import e
 from pathlib import Path
 import random
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Coroutine, Mapping, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -36,9 +36,6 @@ from textual_plotext import PlotextPlot
 from avid.config import MainConfig
 from avid.e_form_predictor import TrainingRun
 from avid.utils import debug_structure
-
-TEXTUAL_ICBM: Final[tuple[float, float]] = (55.9533, -3.1883)
-"""The ICBM address of the approximate location of Textualize HQ."""
 
 
 class Losses(PlotextPlot):
@@ -83,7 +80,7 @@ class Losses(PlotextPlot):
             max_data = 0
             for name, color in zip(self._data, cycle(self._colors)):
                 yvals = self._data[name]
-                max_data = max(max_data, max(yvals))
+                max_data = max(max_data, max(yvals, default=1))
                 self.plt.plot(np.arange(len(yvals)), yvals, color=color, label=name)
 
             self.plt.ylim(0, max_data * 1.01)
@@ -140,7 +137,7 @@ class Info(Widget):
         tab.clear(columns=True)
         df = pd.DataFrame(dataa)        
         tab.add_columns(*df.columns)
-        tab.add_rows(df.map(lambda x: '{:.03f}'.format(x)).values[-25:])
+        tab.add_rows(df.map(lambda x: '{:.03f}'.format(x)).values[-10:])
 
     def compose(self):
         self.widget = DataTable(show_cursor=False, zebra_stripes=True)
@@ -152,8 +149,8 @@ class Dashboard(App):
 
     CSS = """
     Grid {
-        grid-size: 2 1;
-        grid-columns: 3fr 1fr;
+        grid-size: 1 2;
+        grid-rows: 3fr 2fr;
     }
 
     Losses {
@@ -180,6 +177,8 @@ class Dashboard(App):
         super().__init__()
         self._run: TrainingRun = run
         self._plot_cols = plot_cols
+        self._config = config        
+        self.info = Info()
 
     def on_mount(self):
         self.log(self._run)
@@ -190,7 +189,7 @@ class Dashboard(App):
         yield Header()
         with Grid():
             yield Losses('Losses')
-            yield Info()
+            yield self.info
         yield Footer()
 
     def update_data(self, data):
@@ -206,7 +205,7 @@ class Dashboard(App):
         for plot in self.query(Losses).results(Losses):
             plot.update_data(filtered_data)
 
-        self.query_one(Info).update_data(self.data)
+        self.info.update_data(self.data)
         self.refresh(layout=True)
 
     def watch_colors(self) -> None:
@@ -231,21 +230,23 @@ class Dashboard(App):
         return super().watch_dark(dark)
     
     def finish(self, state: TrainingRun):
-        now = datetime.now()
-        now_fmt = now.strftime('%m-%H:%M')
-        for i in range(100):
-            folder = Path('logs/') / f'e_form_{now_fmt}_{run.seed}_{i}'
-            if folder.exists():
-                continue
+        if self._config.log.exp_name is None:
+            now = datetime.now()
+            exp_name = now.strftime('%m-%H:%M')
+        else:
+            exp_name = self._config.log.exp_name
+        
+        folder = Path('logs/') / f'{exp_name}_{state.seed}'
+        folder.mkdir(exist_ok=True)        
             
-        folder.mkdir()
-
         pd.DataFrame(state.metrics_history).to_feather(folder / 'metrics.feather')
         
         with open(folder / 'config.toml', 'w') as outfile:
-            pyrallis.cfgparsing.dump(self.config, outfile)
+            pyrallis.cfgparsing.dump(self._config, outfile)        
 
-        self.title = 'Finished in {:.1f} minutes'.format(max(state.metrics_history['rel_mins']))
+        self.title = 'Finished in {:.1f} minutes, saved to {}'.format(max(state.metrics_history['rel_mins']), folder)
+
+        state.save_final(folder / 'final_ckpt')
         self.refresh(layout=True)
 
 

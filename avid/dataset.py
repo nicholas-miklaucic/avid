@@ -47,6 +47,18 @@ class DataBatch(eqx.Module):
             jnp.empty(batch_size),
             jnp.empty((batch_size, 6)),
         )
+    
+
+    def device_put(self, devices: jax.sharding.PositionalSharding | jax.Device):
+        if isinstance(devices, jax.Device):
+            return jax.device_put(self, devices)
+        else:
+            for key in ['density', 'species', 'mask', 'e_form', 'lat_abc_angles']:
+                sh = getattr(self, key).shape
+                new_shape = [1] * len(sh)
+                new_shape[0] = -1
+                jax.device_put(getattr(self, key), devices.reshape(*new_shape))
+            return self
 
 
 def load_file(config: MainConfig, file_num=0):
@@ -132,7 +144,11 @@ def dataloader_base(
 
     # debug_structure(splidx=split_idx, bi0=batch_inds[0], bi=batch_inds)
 
-    device = config.device.jax_devices[0]
+    device = config.device.jax_device
+
+    if isinstance(device, jax.sharding.PositionalSharding):
+        # rearrange to fit shape of databatch
+        device = device.reshape(-1, 1, 1, 1, 1)
 
     with jax.default_device(jax.devices('cpu')[0]):
         for batch in batch_inds:
@@ -140,7 +156,7 @@ def dataloader_base(
 
             batch_data = split_files[batch]
             collated = jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
-            yield jax.device_put(collated, device)
+            yield collated.device_put(device)
 
     while infinite:
         batch_inds = np.split(
@@ -150,7 +166,7 @@ def dataloader_base(
         for batch in batch_inds:
             batch_data = [split_files[i] for i in batch]
             collated = jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
-            yield jax.device_put(collated, device)
+            yield collated.device_put(device)
 
 
 def dataloader(

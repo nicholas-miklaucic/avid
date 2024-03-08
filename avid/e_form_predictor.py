@@ -3,6 +3,7 @@ encoder."""
 
 from collections import defaultdict
 from functools import partial
+from os import PathLike
 import random
 import time
 from typing import Callable
@@ -45,6 +46,29 @@ class Patchify(nn.Module):
         )
 
         return patch_embed(patch)
+    
+
+class AddPositionEmbs(nn.Module):
+    """Adds learned positional embeddings to the inputs.
+
+    Attributes:
+    posemb_init: positional embedding initializer.
+    """
+    posemb_init: Callable = nn.initializers.normal(stddev=0.02)
+
+    @nn.compact
+    def __call__(self, inputs):
+        """Applies the AddPositionEmbs module.
+
+        Args:
+            inputs: Inputs to the layer.
+
+        Returns:
+            Output tensor with shape `(timesteps, in_dim)`.
+        """        
+        pos_emb_shape = inputs.shape
+        pe = self.param('pos_embedding', self.posemb_init, pos_emb_shape)
+        return inputs + pe
 
 
 class LegendrePosEmbed(nn.Module):
@@ -86,9 +110,15 @@ class SingleImageEmbed(nn.Module):
         patches = rearrange(patches, 'n1 p1 n2 p2 n3 p3 c -> (n1 n2 n3) p1 p2 p3 c')
 
         embed = jax.vmap(Patchify(self.patch_latent_dim))(patches)
-        pos_embed = self.pos_embed(rearrange(embed, '(i1 i2 i3) c -> i1 i2 i3 c', i1=n, i2=n, i3=n))
-
-        return rearrange(pos_embed, 'i1 i2 i3 c -> (i1 i2 i3) c', i1=n, i2=n, i3=n)
+        # legendre
+        # pos_embed = self.pos_embed(rearrange(embed, '(i1 i2 i3) c -> i1 i2 i3 c', i1=n, i2=n,
+        # i3=n))
+        # return rearrange(pos_embed, 'i1 i2 i3 c -> (i1 i2 i3) c', i1=n, i2=n, i3=n)
+        
+        # learned
+        pos_embed = self.pos_embed(embed)
+        return pos_embed
+        
 
 
 class ImageEmbed(nn.Module):
@@ -214,7 +244,8 @@ class ViTRegressor(nn.Module):
 
     @nn.compact
     def __call__(self, im: DataBatch, training: bool):
-        pos_embed = LegendrePosEmbed(self.max_grid, self.pos_latent_dim, name='pos_embed')
+        # pos_embed = LegendrePosEmbed(self.max_grid, self.pos_latent_dim, name='pos_embed')
+        pos_embed = AddPositionEmbs(name='pos_embed')
         im_embed = ImageEmbed(
             SingleImageEmbed(
                 self.patch_size, self.patch_latent_dim, self.pos_latent_dim, pos_embed
@@ -272,15 +303,17 @@ class Metrics(metrics.Collection):
 
 
 class TrainState(train_state.TrainState):
-    key: jax.Array
     metrics: Metrics
 
 
 def create_train_state(module, rng, learning_rate):
     params = module.init(rng, DataBatch.new_empty(52, 24, 5), training=False)
-    tx = optax.adamw(learning_rate, weight_decay=0.3)
+    tx = optax.chain(
+        optax.adamw(learning_rate, weight_decay=0.03),
+        optax.clip_by_global_norm(1.0)
+    )
     return TrainState.create(
-        apply_fn=module.apply, params=params, tx=tx, metrics=Metrics.empty(), key=rng
+        apply_fn=module.apply, params=params, tx=tx, metrics=Metrics.empty()
     )
 
 
@@ -294,7 +327,7 @@ def train_step(state: TrainState, batch: DataBatch, rng):
             params, batch, training=True, rngs={'dropout': dropout_train_key}
         ).squeeze()
 
-        delta = 0.3
+        delta = 0.1
         loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
         return loss
 
@@ -308,7 +341,7 @@ def train_step(state: TrainState, batch: DataBatch, rng):
 def compute_metrics(*, state: TrainState, batch: DataBatch):
     preds = state.apply_fn(state.params, batch, training=False).squeeze()
 
-    delta = 0.3
+    delta = 0.1
     loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
     mae = jnp.abs(preds - batch.e_form).mean()
     rmse = jnp.sqrt(optax.losses.l2_loss(preds, batch.e_form).mean())
@@ -322,12 +355,12 @@ class TrainingRun:
     def __init__(self, config: MainConfig):
         self.seed = random.randint(100, 1000)
         self.rng = jax.random.key(self.seed)
-        print(self.seed)
+        print(f'Seed: {self.seed}')
         self.config = MainConfig
-        self.orbax_checkpointer = ocp.PyTreeCheckpointer()
-        options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=2, create=True)
-        self.mngr = orbax.checkpoint.CheckpointManager(
-            ocp.test_utils.create_empty('/tmp/ckpt/'), options=options
+        self.orbax_checkpointer = ocp.PyTreeCheckpointer()        
+        options = ocp.CheckpointManagerOptions(save_interval_steps=config.num_epochs // 2, max_to_keep=2, create=True)
+        self.mngr: ocp.CheckpointManager = ocp.CheckpointManager(
+            '/tmp/avid_ckpt/', self.orbax_checkpointer, options=options
         )
 
         self.metrics_history = defaultdict(list)
@@ -339,14 +372,13 @@ class TrainingRun:
         self.steps = range(self.num_steps)
         self.curr_step = 0
         self.start_time = time.monotonic()
-
         warmup_steps = self.steps_in_epoch * min(4, self.num_epochs // 2)
         self.scheduler = optax.warmup_cosine_decay_schedule(
             init_value=1e-4,
             peak_value=4e-3,
             warmup_steps=warmup_steps,
             end_value=4e-4,
-            decay_steps=self.num_steps - warmup_steps,
+            decay_steps=self.num_steps,
         )
         self.state = create_train_state(ViTRegressor(), self.rng, self.scheduler)
 
@@ -383,7 +415,10 @@ class TrainingRun:
             self.metrics_history['step'].append(self.curr_step)
             self.metrics_history['epoch'].append(self.curr_step // self.steps_in_epoch)
             self.metrics_history['rel_mins'].append((time.monotonic() - self.start_time) / 60)
+            self.mngr.wait_until_finished()
 
+        self.mngr.save(self.curr_step, args=ocp.args.StandardSave(self.ckpt()))
+        
         return self
 
     def step_until_done(self):
@@ -401,6 +436,18 @@ class TrainingRun:
     @property
     def lr(self):
         return self.scheduler(self.curr_step).item() * 100.0
+
+    def ckpt(self):
+        """Checkpoint PyTree."""
+        return {
+            'model': self.state,
+            'seed': self.seed
+        }
+    
+    def save_final(self, out_file: str | PathLike):
+        self.orbax_checkpointer.save(out_file, self.ckpt())
+        self.orbax_checkpointer.wait_until_finished()
+        self.mngr.wait_until_finished()
 
 
 if __name__ == '__main__':
@@ -420,6 +467,3 @@ if __name__ == '__main__':
 
     if config.do_profile:
         jax.profiler.stop_trace()
-
-    run = TrainingRun(config)
-    run_using_dashboard(config, run)

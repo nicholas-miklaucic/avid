@@ -1,11 +1,14 @@
 from enum import Enum
 import logging
+
+from typing import Optional
 from flax.struct import dataclass
 from typing import Literal
 from jax import Device
 import jax
 import pyrallis
 from pyrallis import field
+import orbax
 from pathlib import Path
 
 pyrallis.set_config_type('toml')
@@ -84,7 +87,7 @@ class CLIConfig:
         from rich.traceback import install as traceback_install
 
         pretty_install()
-        traceback_install()
+        traceback_install(suppress=(orbax))
 
         logging.basicConfig(
             level=self.verbosity.value,
@@ -92,7 +95,7 @@ class CLIConfig:
             datefmt='[%X]',
             handlers=[
                 RichHandler(
-                    rich_tracebacks=True,
+                    rich_tracebacks=False,
                     show_time=False,
                     show_level=False,
                     show_path=False,
@@ -103,11 +106,69 @@ class CLIConfig:
 
 @dataclass
 class DeviceConfig:
+    # Either 'cpu', 'gpu', or 'tpu'
     device: str = 'gpu'
 
+    # Limits the number of GPUs used. 0 means no limit.
+    max_gpus: int = 1
+
     @property
-    def jax_devices(self):
-        return jax.devices(self.device)
+    def jax_device(self):
+        devs = jax.devices(self.device)
+        if self.device == 'gpu' and self.max_gpus != 0:            
+            devs = devs[:self.max_gpus]
+        
+        if len(devs) > 1:
+            return jax.sharding.PositionalSharding(devs)
+        else:
+            return devs[0]
+    
+
+@dataclass
+class LogConfig:
+    log_dir: Path = Path('logs/')
+
+    exp_name: Optional[str] = None
+
+
+@dataclass
+class ViTConfig:
+    """Settings for vision transformer."""
+    # Patch size: p, where image is broken up into p x p x p cubes.
+    patch_size: int = 4
+    # Patch inner dimension.
+    patch_latent_dim: int = 384
+    # Position embedding dimension. Learned positional embeddings don't use this.
+    pos_embed_dim: int = 32
+    # Position embedding initialization. 'legendre' uses custom Legendre basis, concatenating with
+    # the patch embedding. 'learned' uses standard learned embeddings that are added with the patch
+    # embedding.
+    pos_embed_type: str = 'learned'
+
+@dataclass    
+class SpeciesEmbedConfig:    
+    # Inner dimensions of the MLP. This is quite flop-expensive, because it's applied to every voxel
+    # of the data before downsampling.
+    inner_dims: tuple[int] = ()
+
+    # Output dimension.
+    dim_out: int = 32
+
+@dataclass
+class DownsampleConfig:
+    # Downsampling factor: if 2, then new image is 1/8 the size.
+    factor: int = 2
+
+    # Output channels.
+    channels_out: int = 256
+
+    # Kernel size: Fairly flop-expensive to increase. Must be at least 2 * factor - 1 to actually
+    # use every input data point.
+    kernel_size: int = 3
+
+    def __post_init__(self):
+        if (self.kernel_size - 1) // 2 < (self.downsample_factor - 1):
+            raise ValueError(f'Configuration {self} would skip data!')
 
 
 @dataclass
@@ -125,6 +186,7 @@ class MainConfig:
     data: DataConfig = field(default_factory=DataConfig)
     cli: CLIConfig = field(default_factory=CLIConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
+    log: LogConfig = field(default_factory=LogConfig)
 
     def __post_init__(self):
         if self.batch_size % self.data.data_batch_size != 0:
@@ -134,7 +196,10 @@ class MainConfig:
                 )
             )
 
-        self.cli.set_up_logging()
+        self.cli.set_up_logging()        
+        if not self.log.log_dir.exists():
+            raise ValueError(f'Log directory {self.log.log_dir} does not exist!')
+
 
         from jax.experimental.compilation_cache.compilation_cache import set_cache_dir
 

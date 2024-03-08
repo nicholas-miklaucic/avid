@@ -140,10 +140,10 @@ class Info(Widget):
         tab.clear(columns=True)
         df = pd.DataFrame(dataa)
         tab.add_columns(*df.columns)
-        tab.add_rows(df.map(lambda x: '{:3.02f}'.format(x)).values)
+        tab.add_rows(df.map(lambda x: '{:.03f}'.format(x)).values[-20:])
 
     def compose(self):
-        yield DataTable()
+        yield DataTable(show_cursor=False, zebra_stripes=True)
 
 
 class Dashboard(App):
@@ -158,6 +158,10 @@ class Dashboard(App):
     Losses {
         padding: 1 2;
     }
+
+    Info {
+        text-style: bold;
+    }
     """
 
     TITLE = 'Training'
@@ -170,10 +174,11 @@ class Dashboard(App):
     data = reactive({})
     colors = reactive(lambda: rp.matplotlib.DARK_COLORS)
 
-    def __init__(self, run: TrainingRun) -> None:
+    def __init__(self, run: TrainingRun, plot_cols=('train_', 'test_', 'lr')) -> None:
         """Initialise the application."""
         super().__init__()
         self._run: TrainingRun = run
+        self._plot_cols = plot_cols
 
     def on_mount(self):
         self.log(self._run)
@@ -192,8 +197,13 @@ class Dashboard(App):
         self.watch_data()
 
     def watch_data(self) -> None:
+        filtered_data = {
+            k: v
+            for k, v in self.data.items()
+            if any(k.startswith(pref) for pref in self._plot_cols)
+        }
         for plot in self.query(Losses).results(Losses):
-            plot.update_data(self.data)
+            plot.update_data(filtered_data)
 
         self.query_one(Info).update_data(self.data)
         self.refresh(layout=True)
@@ -212,7 +222,7 @@ class Dashboard(App):
             else:
                 break
 
-        self.call_from_thread(self.refresh, layout=True)
+        self.call_from_thread(self.update_data, run_state.metrics_history)
 
     def watch_dark(self, dark: bool) -> None:
         self.colors = rp.matplotlib.DARK_COLORS if dark else rp.matplotlib.LIGHT_COLORS

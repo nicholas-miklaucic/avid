@@ -1,0 +1,18 @@
+batch_size = 52
+do_profile = false
+num_epochs = 300
+
+[data]
+data_batch_size = 52
+raw_data_folder = "data"
+data_folder = "precomputed"
+train_split = 8
+test_split = 3
+valid_split = 3
+
+[cli]
+verbosity = "info"
+show_progress = true
+
+[device]
+device = "gpu"

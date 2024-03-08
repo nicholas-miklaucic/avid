@@ -1,4 +1,5 @@
 batch_size = 52
+do_profile = false
 
 [data]
 train_split = 2

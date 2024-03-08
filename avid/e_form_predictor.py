@@ -1,6 +1,10 @@
 """Simple module to predict e_form from latent representation. A quick way to benchmark an
 encoder."""
 
+from collections import defaultdict
+from functools import partial
+import random
+import time
 from typing import Callable
 from einops import rearrange, reduce
 import jax
@@ -28,8 +32,8 @@ class Patchify(nn.Module):
     """Patchify block in 3D, with lazy patch size."""
 
     dim_out: int
-    kernel_init: Callable = nn.initializers.glorot_normal()
-    bias_init: Callable = nn.initializers.uniform()
+    kernel_init: Callable = nn.initializers.xavier_normal()
+    bias_init: Callable = nn.initializers.normal()
 
     @tcheck
     @nn.compact
@@ -191,20 +195,20 @@ class Encoder(nn.Module):
 
 class ViTRegressor(nn.Module):
     patch_size: int = 4
-    patch_latent_dim: int = 32
-    pos_latent_dim: int = 16
+    patch_latent_dim: int = 384
+    pos_latent_dim: int = 32
     max_grid: int = 24
-    species_embed_head_inner_dims: tuple[int] = (24,)
-    species_embed_dim: int = 16
-    species_embed_dim_out: int = 8
+    species_embed_head_inner_dims: tuple[int] = ()
+    species_embed_dim: int = 32
+    species_embed_dim_out: int = 64
     downsample_factors: tuple[int] = (2,)
-    channels_out: tuple[int] = (10,)
+    channels_out: tuple[int] = (256,)
     kernel_sizes: tuple[int] = (3,)
     num_layers: int = 2
     num_heads: int = 4
-    enc_dropout_rate: float = 0.1
-    enc_attention_dropout_rate: float = 0.1
-    regressor_head_inner_dims: tuple[int] = (48,)
+    enc_dropout_rate: float = 0.2
+    enc_attention_dropout_rate: float = 0.2
+    regressor_head_inner_dims: tuple[int] = (256,)
     regressor_head_act: nn.Module = Identity()
     output_dim: int = 1
 
@@ -263,6 +267,8 @@ class ViTRegressor(nn.Module):
 @struct.dataclass
 class Metrics(metrics.Collection):
     loss: metrics.Average.from_output('loss')
+    rmse: metrics.Average.from_output('rmse')
+    mae: metrics.Average.from_output('mae')
 
 
 class TrainState(train_state.TrainState):
@@ -272,14 +278,14 @@ class TrainState(train_state.TrainState):
 
 def create_train_state(module, rng, learning_rate):
     params = module.init(rng, DataBatch.new_empty(52, 24, 5), training=False)
-    tx = optax.adamw(learning_rate)
+    tx = optax.adamw(learning_rate, weight_decay=0.3)
     return TrainState.create(
         apply_fn=module.apply, params=params, tx=tx, metrics=Metrics.empty(), key=rng
     )
 
 
 @jax.jit
-def train_step(state: nn.Module, batch: DataBatch, rng):
+def train_step(state: TrainState, batch: DataBatch, rng):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=rng, data=state.step)
 
@@ -287,7 +293,9 @@ def train_step(state: nn.Module, batch: DataBatch, rng):
         preds = state.apply_fn(
             params, batch, training=True, rngs={'dropout': dropout_train_key}
         ).squeeze()
-        loss = optax.losses.l2_loss(preds, targets=batch.e_form).mean()
+
+        delta = 0.3
+        loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
         return loss
 
     grad_fn = jax.grad(loss_fn)
@@ -300,10 +308,11 @@ def train_step(state: nn.Module, batch: DataBatch, rng):
 def compute_metrics(*, state: TrainState, batch: DataBatch):
     preds = state.apply_fn(state.params, batch, training=False).squeeze()
 
-    # l1 loss is just not a thing for some reason?
-    delta = 1e-4
+    delta = 0.3
     loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
-    metric_updates = state.metrics.single_from_model_output(loss=loss)
+    mae = jnp.abs(preds - batch.e_form).mean()
+    rmse = jnp.sqrt(optax.losses.l2_loss(preds, batch.e_form).mean())
+    metric_updates = state.metrics.single_from_model_output(mae=mae, loss=loss, rmse=rmse)
     metrics = state.metrics.merge(metric_updates)
     state = state.replace(metrics=metrics)
     return state
@@ -311,6 +320,9 @@ def compute_metrics(*, state: TrainState, batch: DataBatch):
 
 class TrainingRun:
     def __init__(self, config: MainConfig):
+        self.seed = random.randint(100, 1000)
+        self.rng = jax.random.key(self.seed)
+        print(self.seed)
         self.config = MainConfig
         self.orbax_checkpointer = ocp.PyTreeCheckpointer()
         options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=2, create=True)
@@ -318,20 +330,25 @@ class TrainingRun:
             ocp.test_utils.create_empty('/tmp/ckpt/'), options=options
         )
 
-        self.rng = jax.random.key(2718)
-        self.state = create_train_state(ViTRegressor(), self.rng, 1e-3)
+        self.metrics_history = defaultdict(list)
 
-        self.metrics_history = {
-            'train_loss': [],
-            'test_loss': [],
-        }
-
-        self.num_epochs = 15
+        self.num_epochs = config.num_epochs
         self.steps_in_epoch, self.dl = dataloader(config, split='train', infinite=True)
         self.steps_in_test_epoch, self.test_dl = dataloader(config, split='valid', infinite=True)
         self.num_steps = self.steps_in_epoch * self.num_epochs
         self.steps = range(self.num_steps)
         self.curr_step = 0
+        self.start_time = time.monotonic()
+
+        warmup_steps = self.steps_in_epoch * min(4, self.num_epochs // 2)
+        self.scheduler = optax.warmup_cosine_decay_schedule(
+            init_value=1e-4,
+            peak_value=4e-3,
+            warmup_steps=warmup_steps,
+            end_value=4e-4,
+            decay_steps=self.num_steps - warmup_steps,
+        )
+        self.state = create_train_state(ViTRegressor(), self.rng, self.scheduler)
 
     def next_step(self):
         return self.step(self.curr_step + 1, next(self.dl))
@@ -349,6 +366,7 @@ class TrainingRun:
         if (step + 1) % self.steps_in_epoch == 0:  # one training epoch has passed
             for metric, value in self.state.metrics.compute().items():  # compute metrics
                 self.metrics_history[f'train_{metric}'].append(value.item())  # record metrics
+
             self.state = self.state.replace(
                 metrics=self.state.metrics.empty()
             )  # reset train_metrics for next training epoch
@@ -360,6 +378,11 @@ class TrainingRun:
 
             for metric, value in self.test_state.metrics.compute().items():
                 self.metrics_history[f'test_{metric}'].append(value.item())
+
+            self.metrics_history['lr'].append(self.lr)
+            self.metrics_history['step'].append(self.curr_step)
+            self.metrics_history['epoch'].append(self.curr_step // self.steps_in_epoch)
+            self.metrics_history['rel_mins'].append((time.monotonic() - self.start_time) / 60)
 
         return self
 
@@ -375,11 +398,18 @@ class TrainingRun:
     def epoch_just_finished(self):
         return (self.curr_step + 1) % self.steps_in_epoch == 0
 
+    @property
+    def lr(self):
+        return self.scheduler(self.curr_step).item() * 100.0
+
 
 if __name__ == '__main__':
     from avid.training_runner import run_using_dashboard, run_using_progress
 
     config = pyrallis.argparsing.parse(MainConfig, 'configs/smoke_test.toml')
+
+    if config.do_profile:
+        jax.profiler.start_trace('/tmp/jax-trace', create_perfetto_link=True)
 
     kwargs = dict(training=False)
     batch = load_file(config, 0)
@@ -387,6 +417,9 @@ if __name__ == '__main__':
     out, params = mod.init_with_output(jax.random.key(0), im=batch, **kwargs)
     debug_structure(batch=batch, module=mod, out=out)
     flax_summary(mod, batch, **kwargs)
+
+    if config.do_profile:
+        jax.profiler.stop_trace()
 
     run = TrainingRun(config)
     run_using_dashboard(config, run)

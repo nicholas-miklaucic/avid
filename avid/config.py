@@ -118,6 +118,9 @@ class MainConfig:
     # Use profiling.
     do_profile: bool = False
 
+    # Number of epochs.
+    num_epochs: int = 100
+
     voxelizer: VoxelizerConfig = field(default_factory=VoxelizerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     cli: CLIConfig = field(default_factory=CLIConfig)

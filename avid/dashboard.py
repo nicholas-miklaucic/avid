@@ -8,13 +8,13 @@ from datetime import datetime, timedelta
 from itertools import cycle
 from json import loads
 from math import e
+from pathlib import Path
 import random
 import time
 from typing import Any, Mapping, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from h11 import Data
 import jax
 import numpy as np
 import pandas as pd
@@ -136,14 +136,15 @@ class Info(Widget):
         super().__init__()
 
     def update_data(self, dataa):
-        tab = self.query_one(DataTable)
+        tab = self.widget
         tab.clear(columns=True)
-        df = pd.DataFrame(dataa)
+        df = pd.DataFrame(dataa)        
         tab.add_columns(*df.columns)
-        tab.add_rows(df.map(lambda x: '{:.03f}'.format(x)).values[-20:])
+        tab.add_rows(df.map(lambda x: '{:.03f}'.format(x)).values[-25:])
 
     def compose(self):
-        yield DataTable(show_cursor=False, zebra_stripes=True)
+        self.widget = DataTable(show_cursor=False, zebra_stripes=True)
+        yield self.widget
 
 
 class Dashboard(App):
@@ -168,13 +169,13 @@ class Dashboard(App):
 
     BINDINGS = [
         ('d', 'app.toggle_dark', 'Toggle light/dark mode'),
-        ('q', 'app.quit', 'Quit the example'),
+        ('q', 'app.quit', 'Quit training'),
     ]
 
     data = reactive({})
     colors = reactive(lambda: rp.matplotlib.DARK_COLORS)
 
-    def __init__(self, run: TrainingRun, plot_cols=('train_', 'test_', 'lr')) -> None:
+    def __init__(self, run: TrainingRun, config: MainConfig, plot_cols=('train_', 'test_', 'lr')) -> None:
         """Initialise the application."""
         super().__init__()
         self._run: TrainingRun = run
@@ -222,11 +223,31 @@ class Dashboard(App):
             else:
                 break
 
-        self.call_from_thread(self.update_data, run_state.metrics_history)
+        self.call_from_thread(self.update_data, state.metrics_history)
+        self.call_from_thread(self.finish, state)
 
     def watch_dark(self, dark: bool) -> None:
         self.colors = rp.matplotlib.DARK_COLORS if dark else rp.matplotlib.LIGHT_COLORS
         return super().watch_dark(dark)
+    
+    def finish(self, state: TrainingRun):
+        now = datetime.now()
+        now_fmt = now.strftime('%m-%H:%M')
+        for i in range(100):
+            folder = Path('logs/') / f'e_form_{now_fmt}_{run.seed}_{i}'
+            if folder.exists():
+                continue
+            
+        folder.mkdir()
+
+        pd.DataFrame(state.metrics_history).to_feather(folder / 'metrics.feather')
+        
+        with open(folder / 'config.toml', 'w') as outfile:
+            pyrallis.cfgparsing.dump(self.config, outfile)
+
+        self.title = 'Finished in {:.1f} minutes'.format(max(state.metrics_history['rel_mins']))
+        self.refresh(layout=True)
+
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ import jax
 
 
 def run_using_dashboard(config: MainConfig, run):
-    app = Dashboard(run)
+    app = Dashboard(run, config=config)
     app.run()
     return run
 

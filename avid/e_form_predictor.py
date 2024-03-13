@@ -2,11 +2,14 @@
 encoder."""
 
 from collections import defaultdict
+from datetime import timedelta
 from functools import partial
 from os import PathLike
+from pathlib import Path
 import random
+from shutil import copytree
 import time
-from typing import Callable
+from typing import Callable, Mapping, Sequence
 from einops import rearrange, reduce
 import jax
 import jax.numpy as jnp
@@ -15,11 +18,14 @@ from flax import linen as nn
 import pyrallis
 from rich.prompt import Confirm
 from clu import metrics
-from flax.training import train_state, orbax_utils
+from flax.training import train_state, orbax_utils, checkpoints
 from flax import struct
 import optax
-import orbax
 import orbax.checkpoint as ocp
+from flax.serialization import to_state_dict, from_state_dict
+import pickle
+
+from torch import Value
 
 from avid.config import MainConfig
 from avid.coord_embeddings import legendre_embed, legendre_grid_embeds
@@ -46,7 +52,7 @@ class Patchify(nn.Module):
         )
 
         return patch_embed(patch)
-    
+
 
 class AddPositionEmbs(nn.Module):
     """Adds learned positional embeddings to the inputs.
@@ -54,6 +60,7 @@ class AddPositionEmbs(nn.Module):
     Attributes:
     posemb_init: positional embedding initializer.
     """
+
     posemb_init: Callable = nn.initializers.normal(stddev=0.02)
 
     @nn.compact
@@ -65,7 +72,7 @@ class AddPositionEmbs(nn.Module):
 
         Returns:
             Output tensor with shape `(timesteps, in_dim)`.
-        """        
+        """
         pos_emb_shape = inputs.shape
         pe = self.param('pos_embedding', self.posemb_init, pos_emb_shape)
         return inputs + pe
@@ -114,11 +121,10 @@ class SingleImageEmbed(nn.Module):
         # pos_embed = self.pos_embed(rearrange(embed, '(i1 i2 i3) c -> i1 i2 i3 c', i1=n, i2=n,
         # i3=n))
         # return rearrange(pos_embed, 'i1 i2 i3 c -> (i1 i2 i3) c', i1=n, i2=n, i3=n)
-        
+
         # learned
         pos_embed = self.pos_embed(embed)
         return pos_embed
-        
 
 
 class ImageEmbed(nn.Module):
@@ -236,8 +242,8 @@ class ViTRegressor(nn.Module):
     kernel_sizes: tuple[int] = (3,)
     num_layers: int = 2
     num_heads: int = 4
-    enc_dropout_rate: float = 0.2
-    enc_attention_dropout_rate: float = 0.2
+    enc_dropout_rate: float = 0.1
+    enc_attention_dropout_rate: float = 0.1
     regressor_head_inner_dims: tuple[int] = (256,)
     regressor_head_act: nn.Module = Identity()
     output_dim: int = 1
@@ -308,13 +314,8 @@ class TrainState(train_state.TrainState):
 
 def create_train_state(module, rng, learning_rate):
     params = module.init(rng, DataBatch.new_empty(52, 24, 5), training=False)
-    tx = optax.chain(
-        optax.adamw(learning_rate, weight_decay=0.03),
-        optax.clip_by_global_norm(1.0)
-    )
-    return TrainState.create(
-        apply_fn=module.apply, params=params, tx=tx, metrics=Metrics.empty()
-    )
+    tx = optax.chain(optax.adamw(learning_rate, weight_decay=4e-3), optax.clip_by_global_norm(1.0))
+    return TrainState.create(apply_fn=module.apply, params=params, tx=tx, metrics=Metrics.empty())
 
 
 @jax.jit
@@ -327,7 +328,7 @@ def train_step(state: TrainState, batch: DataBatch, rng):
             params, batch, training=True, rngs={'dropout': dropout_train_key}
         ).squeeze()
 
-        delta = 0.1
+        delta = 1e-4
         loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
         return loss
 
@@ -341,7 +342,7 @@ def train_step(state: TrainState, batch: DataBatch, rng):
 def compute_metrics(*, state: TrainState, batch: DataBatch):
     preds = state.apply_fn(state.params, batch, training=False).squeeze()
 
-    delta = 0.1
+    delta = 1e-4
     loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
     mae = jnp.abs(preds - batch.e_form).mean()
     rmse = jnp.sqrt(optax.losses.l2_loss(preds, batch.e_form).mean())
@@ -351,17 +352,20 @@ def compute_metrics(*, state: TrainState, batch: DataBatch):
     return state
 
 
+@struct.dataclass
+class Checkpoint:
+    state: TrainState
+    seed: int
+    metrics_history: Mapping[str, Sequence[float]]
+    curr_epoch: float
+
+
 class TrainingRun:
     def __init__(self, config: MainConfig):
         self.seed = random.randint(100, 1000)
         self.rng = jax.random.key(self.seed)
         print(f'Seed: {self.seed}')
-        self.config = MainConfig
-        self.orbax_checkpointer = ocp.PyTreeCheckpointer()        
-        options = ocp.CheckpointManagerOptions(save_interval_steps=config.num_epochs // 2, max_to_keep=2, create=True)
-        self.mngr: ocp.CheckpointManager = ocp.CheckpointManager(
-            '/tmp/avid_ckpt/', self.orbax_checkpointer, options=options
-        )
+        self.config = config
 
         self.metrics_history = defaultdict(list)
 
@@ -372,15 +376,37 @@ class TrainingRun:
         self.steps = range(self.num_steps)
         self.curr_step = 0
         self.start_time = time.monotonic()
-        warmup_steps = self.steps_in_epoch * min(4, self.num_epochs // 2)
-        self.scheduler = optax.warmup_cosine_decay_schedule(
-            init_value=1e-4,
-            peak_value=4e-3,
-            warmup_steps=warmup_steps,
-            end_value=4e-4,
-            decay_steps=self.num_steps,
-        )
+        warmup_steps = self.steps_in_epoch * min(5, self.num_epochs // 2)
+        base_lr = config.train.base_lr
+        min_lr = base_lr / 10
+        if config.train.lr_schedule == 'cosine':
+            self.scheduler = optax.warmup_cosine_decay_schedule(
+                init_value=min_lr,
+                peak_value=base_lr,
+                warmup_steps=warmup_steps,
+                end_value=min_lr,
+                decay_steps=self.num_steps,
+            )
+        elif config.train.lr_schedule == 'finder':
+            self.scheduler = optax.linear_schedule(min_lr, base_lr * 10, self.num_steps)
+        else:
+            raise ValueError(f'Disallowed lr schedule {config.train.lr_schedule}')
         self.state = create_train_state(ViTRegressor(), self.rng, self.scheduler)
+
+        opts = ocp.CheckpointManagerOptions(
+            save_interval_steps=1,
+            best_fn=lambda metrics: metrics['test_loss'],
+            best_mode='min',
+            max_to_keep=4,
+            enable_async_checkpointing=False,
+            keep_time_interval=timedelta(minutes=30),
+        )
+        self.mngr = ocp.CheckpointManager(
+            ocp.test_utils.create_empty('/tmp/jax_ckpt'),
+            options=opts,
+        )
+
+        self.test_loss = 1000
 
     def next_step(self):
         return self.step(self.curr_step + 1, next(self.dl))
@@ -395,14 +421,23 @@ class TrainingRun:
         )  # get updated train state (which contains the updated parameters)
         self.state = compute_metrics(state=self.state, batch=batch)  # aggregate batch metrics
 
-        if (step + 1) % self.steps_in_epoch == 0:  # one training epoch has passed
+        if self.should_log or self.should_ckpt:  # one training epoch has passed
             for metric, value in self.state.metrics.compute().items():  # compute metrics
                 self.metrics_history[f'train_{metric}'].append(value.item())  # record metrics
+
+                if not self.should_ckpt:
+                    self.metrics_history[f'test_{metric}'].append(1)
 
             self.state = self.state.replace(
                 metrics=self.state.metrics.empty()
             )  # reset train_metrics for next training epoch
 
+            self.metrics_history['lr'].append(self.lr)
+            self.metrics_history['step'].append(self.curr_step)
+            self.metrics_history['epoch'].append(self.curr_step / self.steps_in_epoch)
+            self.metrics_history['rel_mins'].append((time.monotonic() - self.start_time) / 60)
+
+        if self.should_ckpt:
             # Compute metrics on the test set after each training epoch
             self.test_state = self.state
             for _i, test_batch in zip(range(self.steps_in_test_epoch), self.test_dl):
@@ -410,15 +445,15 @@ class TrainingRun:
 
             for metric, value in self.test_state.metrics.compute().items():
                 self.metrics_history[f'test_{metric}'].append(value.item())
-
-            self.metrics_history['lr'].append(self.lr)
-            self.metrics_history['step'].append(self.curr_step)
-            self.metrics_history['epoch'].append(self.curr_step // self.steps_in_epoch)
-            self.metrics_history['rel_mins'].append((time.monotonic() - self.start_time) / 60)
+                if f'{metric}' == 'loss':
+                    self.test_loss = value.item()
+            self.mngr.save(
+                self.curr_step,
+                args=ocp.args.StandardSave(self.ckpt()),
+                metrics={'test_loss': self.test_loss},
+            )
             self.mngr.wait_until_finished()
 
-        self.mngr.save(self.curr_step, args=ocp.args.StandardSave(self.ckpt()))
-        
         return self
 
     def step_until_done(self):
@@ -430,8 +465,12 @@ class TrainingRun:
             self.step(step, batch)
 
     @property
-    def epoch_just_finished(self):
-        return (self.curr_step + 1) % self.steps_in_epoch == 0
+    def should_log(self):
+        return (self.curr_step + 1) % (self.steps_in_epoch // self.config.log.logs_per_epoch) == 0
+
+    @property
+    def should_ckpt(self):
+        return (self.curr_step + 1) % (2 * self.steps_in_epoch) == 0
 
     @property
     def lr(self):
@@ -439,15 +478,14 @@ class TrainingRun:
 
     def ckpt(self):
         """Checkpoint PyTree."""
-        return {
-            'model': self.state,
-            'seed': self.seed
-        }
-    
-    def save_final(self, out_file: str | PathLike):
-        self.orbax_checkpointer.save(out_file, self.ckpt())
-        self.orbax_checkpointer.wait_until_finished()
+        return Checkpoint(
+            self.state, self.seed, self.metrics_history, self.curr_step / self.steps_in_epoch
+        )
+
+    def save_final(self, out_dir: str | PathLike):
+        """Save final model to directory."""
         self.mngr.wait_until_finished()
+        copytree(self.mngr.directory, Path(out_dir) / 'ckpts/')
 
 
 if __name__ == '__main__':

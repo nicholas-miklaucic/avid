@@ -16,10 +16,9 @@ pip install toml pyrallis rho-plus equinox diffrax optax plotext rich einops pan
 
 TODO:
 
-- [ ] Learning rate warmup and scheduling
-- [ ] Have option to change RNG at runtime
-- [ ] Show RMSE
-- [ ] Better initialization?
 - [ ] Move things into config files
+- [ ] Take a look at latent space, both species and encoder
 - [ ] Implement upsampler and diffusion transformer backend
+- [ ] Implement warmstart/encoder warmstart
+- [ ] Perhaps configure DiLED in addition to normal diffusion and encoder losses
 - [ ] EMA/SWA

@@ -1,5 +1,6 @@
 batch_size = 52
 do_profile = false
+num_epochs = 100
 
 [voxelizer]
 max_unique_species = 5
@@ -22,3 +23,12 @@ show_progress = true
 
 [device]
 device = "gpu"
+max_gpus = 1
+
+[log]
+log_dir = "logs"
+logs_per_epoch = 10
+
+[train]
+lr_schedule = "cosine"
+base_lr = 0.004

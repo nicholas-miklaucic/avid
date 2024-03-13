@@ -115,14 +115,14 @@ class DeviceConfig:
     @property
     def jax_device(self):
         devs = jax.devices(self.device)
-        if self.device == 'gpu' and self.max_gpus != 0:            
-            devs = devs[:self.max_gpus]
-        
+        if self.device == 'gpu' and self.max_gpus != 0:
+            devs = devs[: self.max_gpus]
+
         if len(devs) > 1:
             return jax.sharding.PositionalSharding(devs)
         else:
             return devs[0]
-    
+
 
 @dataclass
 class LogConfig:
@@ -130,10 +130,15 @@ class LogConfig:
 
     exp_name: Optional[str] = None
 
+    # How many times to make a log each epoch.
+    # 208 = 2^4 * 13 steps per epoch with batch of 1: evenly dividing this is nice.
+    logs_per_epoch: int = 8
+
 
 @dataclass
 class ViTConfig:
     """Settings for vision transformer."""
+
     # Patch size: p, where image is broken up into p x p x p cubes.
     patch_size: int = 4
     # Patch inner dimension.
@@ -145,14 +150,16 @@ class ViTConfig:
     # embedding.
     pos_embed_type: str = 'learned'
 
-@dataclass    
-class SpeciesEmbedConfig:    
+
+@dataclass
+class SpeciesEmbedConfig:
     # Inner dimensions of the MLP. This is quite flop-expensive, because it's applied to every voxel
     # of the data before downsampling.
     inner_dims: tuple[int] = ()
 
     # Output dimension.
     dim_out: int = 32
+
 
 @dataclass
 class DownsampleConfig:
@@ -172,6 +179,18 @@ class DownsampleConfig:
 
 
 @dataclass
+class TrainingConfig:
+    """Training/optimizer parameters."""
+
+    # Learning rate schedule: 'cosine' for warmup+cosine annealing, 'finder' for a linear schedule
+    # that goes up to 20 times the base learning rate.
+    lr_schedule: str = 'cosine'
+
+    # Base learning rate.
+    base_lr: float = 4e-3
+
+
+@dataclass
 class MainConfig:
     # The batch size. Should be a multiple of data_batch_size to make data loading simple.
     batch_size: int = 52 * 1
@@ -187,6 +206,7 @@ class MainConfig:
     cli: CLIConfig = field(default_factory=CLIConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
     log: LogConfig = field(default_factory=LogConfig)
+    train: TrainingConfig = field(default_factory=TrainingConfig)
 
     def __post_init__(self):
         if self.batch_size % self.data.data_batch_size != 0:
@@ -196,10 +216,9 @@ class MainConfig:
                 )
             )
 
-        self.cli.set_up_logging()        
+        self.cli.set_up_logging()
         if not self.log.log_dir.exists():
             raise ValueError(f'Log directory {self.log.log_dir} does not exist!')
-
 
         from jax.experimental.compilation_cache.compilation_cache import set_cache_dir
 

@@ -74,14 +74,22 @@ class Losses(PlotextPlot):
         """Redraw the plot."""
         if self._data and next(iter(self._data.values())):
             self.plt.clear_data()
-            self.plt.xlim(0, len((list(self._data.values()) + [[0]])[0]))
+            nvals = len((list(self._data.values()) + [[0]])[0])
             self.plt.ylabel(self._unit)
             # step = np.arange(len(next(iter(self._data))))
             max_data = 0
+            if 'epoch' in self._data:
+                xx = self._data['epoch']
+            else:
+                xx = np.arange(nvals)
+
+            self.plt.xlim(0, max(xx, default=1) * 1.01)
             for name, color in zip(self._data, cycle(self._colors)):
+                if name == 'epoch':
+                    continue
                 yvals = self._data[name]
                 max_data = max(max_data, max(yvals, default=1))
-                self.plt.plot(np.arange(len(yvals)), yvals, color=color, label=name)
+                self.plt.plot(xx, yvals, color=color, label=name)
 
             self.plt.ylim(0, max_data * 1.01)
 
@@ -135,7 +143,7 @@ class Info(Widget):
     def update_data(self, dataa):
         tab = self.widget
         tab.clear(columns=True)
-        df = pd.DataFrame(dataa)        
+        df = pd.DataFrame(dataa)
         tab.add_columns(*df.columns)
         tab.add_rows(df.map(lambda x: '{:.03f}'.format(x)).values[-10:])
 
@@ -172,12 +180,14 @@ class Dashboard(App):
     data = reactive({})
     colors = reactive(lambda: rp.matplotlib.DARK_COLORS)
 
-    def __init__(self, run: TrainingRun, config: MainConfig, plot_cols=('train_', 'test_', 'lr')) -> None:
+    def __init__(
+        self, run: TrainingRun, config: MainConfig, plot_cols=('train_', 'test_', 'epoch')
+    ) -> None:
         """Initialise the application."""
         super().__init__()
         self._run: TrainingRun = run
         self._plot_cols = plot_cols
-        self._config = config        
+        self._config = config
         self.info = Info()
 
     def on_mount(self):
@@ -228,27 +238,27 @@ class Dashboard(App):
     def watch_dark(self, dark: bool) -> None:
         self.colors = rp.matplotlib.DARK_COLORS if dark else rp.matplotlib.LIGHT_COLORS
         return super().watch_dark(dark)
-    
+
     def finish(self, state: TrainingRun):
         if self._config.log.exp_name is None:
             now = datetime.now()
-            exp_name = now.strftime('%m-%H:%M')
+            exp_name = now.strftime('%m-%d-%H')
         else:
             exp_name = self._config.log.exp_name
-        
-        folder = Path('logs/') / f'{exp_name}_{state.seed}'
-        folder.mkdir(exist_ok=True)        
-            
-        pd.DataFrame(state.metrics_history).to_feather(folder / 'metrics.feather')
-        
-        with open(folder / 'config.toml', 'w') as outfile:
-            pyrallis.cfgparsing.dump(self._config, outfile)        
 
-        self.title = 'Finished in {:.1f} minutes, saved to {}'.format(max(state.metrics_history['rel_mins']), folder)
+        folder = Path('logs/') / f'{exp_name}_{state.seed}'
+        folder.mkdir(exist_ok=True)
+
+        pd.DataFrame(state.metrics_history).to_feather(folder / 'metrics.feather')
+
+        with open(folder / 'config.toml', 'w') as outfile:
+            pyrallis.cfgparsing.dump(self._config, outfile)
+
+        self.title = 'Finished in {:.1f} minutes, saved to {}'.format(
+            max(state.metrics_history['rel_mins']), folder
+        )
 
         state.save_final(folder / 'final_ckpt')
-        self.refresh(layout=True)
-
 
 
 if __name__ == '__main__':

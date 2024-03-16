@@ -27,8 +27,60 @@ max_gpus = 1
 
 [log]
 log_dir = "logs"
-logs_per_epoch = 10
+logs_per_epoch = 8
 
 [train]
+loss_delta = 0.1
 lr_schedule = "cosine"
 base_lr = 0.004
+
+[vit.vit_input]
+patch_size = 4
+patch_latent_dim = 384
+pos_embed_dim = 32
+pos_embed_type = "learned"
+
+[vit.encoder]
+num_layers = 2
+num_heads = 4
+enc_attention_dropout_rate = 0.2
+
+[vit.head]
+inner_dims = []
+out_dim = 1
+dropout = 0.1
+
+[vit.species_embed]
+species_embed_dim = 32
+
+[vit.downsample]
+factor = [ 2,]
+channels_out = [ 256,]
+kernel_size = [ 3,]
+
+[vit.encoder.mlp]
+inner_dims = []
+dropout = 0.1
+
+[vit.head.activation]
+name = "relu"
+
+[vit.head.final_activation]
+name = "Identity"
+
+[vit.species_embed.spec_embed]
+inner_dims = []
+out_dim = 64
+dropout = 0.1
+
+[vit.encoder.mlp.activation]
+name = "relu"
+
+[vit.encoder.mlp.final_activation]
+name = "Identity"
+
+[vit.species_embed.spec_embed.activation]
+name = "relu"
+
+[vit.species_embed.spec_embed.final_activation]
+name = "Identity"

@@ -2,17 +2,17 @@
 
 from avid.config import MainConfig
 from avid.dashboard import Dashboard
-import jax
+from avid.training_state import TrainingRun
 
 
-def run_using_dashboard(config: MainConfig, run):
+def run_using_dashboard(config: MainConfig):
+    run = TrainingRun(config)
     app = Dashboard(run, config=config)
     app.run()
     return run
 
 
 def run_using_progress(config: MainConfig, run):
-    from rich.pretty import pprint
     import rich.progress as prog
 
     update_every = 1

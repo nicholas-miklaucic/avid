@@ -1,27 +1,21 @@
 """Utilities."""
 
-from abc import ABCMeta
-from json import dumps
-import logging
-from types import MappingProxyType
-import jax.numpy as jnp
-import jax
-from jaxtyping import jaxtyped
-import numpy as np
-import equinox as eqx
-from pymatgen.core import Element
-from dataclasses import asdict, is_dataclass
-import rich
-from rich.pretty import pprint
-from rich import print_json
-from rich.tree import Tree
-from rich.style import Style
-from beartype import BeartypeConf, beartype as typechecker
-from functools import partial
-import flax.linen as nn
 import re
-import humanize
+from abc import ABCMeta
+from dataclasses import asdict, is_dataclass
+from functools import partial
+from types import MappingProxyType
 
+import flax.linen as nn
+import humanize
+import jax
+import jax.numpy as jnp
+import numpy as np
+import rich
+from jaxtyping import jaxtyped
+from pymatgen.core import Element
+from rich.style import Style
+from rich.tree import Tree
 
 ELEM_VALS = 'Li Be B N O F Na Mg Al Si S K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Rb Sr Y Zr Nb Mo Ru Rh Pd Ag Cd In Sn Sb Te Cs Ba La Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi'.split(
     ' '
@@ -156,6 +150,7 @@ def tree_traverse(visitor: AbstractTreeVisitor, obj, max_depth=2, collapse_singl
                 if (k, v) not in excluded
             }
     elif is_dataclass(obj):
+        print(obj)
         return {obj.__class__.__name__: tree_traverse(visitor, asdict(obj), max_depth)}
     else:
         name = getattr(obj, '__name__', '|')

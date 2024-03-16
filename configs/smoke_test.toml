@@ -14,3 +14,6 @@ show_progress = true
 [device]
 device = "gpu"
 max_gpus = 1
+
+[log]
+exp_name = 'smoke_test'

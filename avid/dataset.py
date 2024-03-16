@@ -1,64 +1,30 @@
 """Code to load the processed data."""
 
-from functools import partial
 import os
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
-from collections import defaultdict
-from typing import Literal, Optional
-from einops import rearrange
-import numpy as np
+from typing import Literal
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
-import equinox as eqx
+import numpy as np
 import pyrallis
+from einops import rearrange
 
-from avid.config import CLIConfig, DataConfig, VoxelizerConfig, LoggingLevel, MainConfig
+from avid.config import MainConfig
+from avid.databatch import DataBatch
 from avid.metadata import Metadata
-from avid.utils import ELEM_VALS, _debug_structure, debug_stat, debug_structure, tcheck
-
-from jaxtyping import Float, Array, Bool, Int
+from avid.utils import ELEM_VALS, debug_structure
 
 n_elems = len(ELEM_VALS)
 
-from beartype.roar import BeartypeDecorHintPep585DeprecationWarning
 from warnings import filterwarnings
 
+from beartype.roar import BeartypeDecorHintPep585DeprecationWarning
+
 filterwarnings('ignore', category=BeartypeDecorHintPep585DeprecationWarning)
-
-
-@tcheck
-class DataBatch(eqx.Module):
-    """A batch of data."""
-
-    density: Float[Array, 'batch n_grid n_grid n_grid max_spec']
-    species: Int[Array, 'batch max_spec']
-    mask: Bool[Array, 'batch max_spec']
-    e_form: Float[Array, 'batch']
-    lat_abc_angles: Float[Array, 'batch 6']
-
-    @classmethod
-    def new_empty(cls, batch_size: int, n_grid: int, max_spec: int):
-        return DataBatch(
-            jnp.empty((batch_size, n_grid, n_grid, n_grid, max_spec)),
-            jnp.empty((batch_size, max_spec), dtype=jnp.int16),
-            jnp.empty((batch_size, max_spec), dtype=jnp.bool),
-            jnp.empty(batch_size),
-            jnp.empty((batch_size, 6)),
-        )
-    
-
-    def device_put(self, devices: jax.sharding.PositionalSharding | jax.Device):
-        if isinstance(devices, jax.Device):
-            return jax.device_put(self, devices)
-        else:
-            for key in ['density', 'species', 'mask', 'e_form', 'lat_abc_angles']:
-                sh = getattr(self, key).shape
-                new_shape = [1] * len(sh)
-                new_shape[0] = -1
-                jax.device_put(getattr(self, key), devices.reshape(*new_shape))
-            return self
 
 
 def load_file(config: MainConfig, file_num=0):

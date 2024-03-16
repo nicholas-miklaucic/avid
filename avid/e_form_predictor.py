@@ -1,38 +1,19 @@
 """Simple module to predict e_form from latent representation. A quick way to benchmark an
 encoder."""
 
-from collections import defaultdict
-from datetime import timedelta
-from functools import partial
-from os import PathLike
-from pathlib import Path
-import random
-from shutil import copytree
-import time
-from typing import Callable, Mapping, Sequence
-from einops import rearrange, reduce
+from typing import Callable
+
 import jax
 import jax.numpy as jnp
-from jaxtyping import Float, Array, Int, Bool
-from flax import linen as nn
 import pyrallis
-from rich.prompt import Confirm
-from clu import metrics
-from flax.training import train_state, orbax_utils, checkpoints
-from flax import struct
-import optax
-import orbax.checkpoint as ocp
-from flax.serialization import to_state_dict, from_state_dict
-import pickle
+from einops import rearrange, reduce
+from flax import linen as nn
+from jaxtyping import Array, Float
 
-from torch import Value
-
-from avid.config import MainConfig
-from avid.coord_embeddings import legendre_embed, legendre_grid_embeds
-from avid.dataset import DataBatch, dataloader, load_file
-from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
-from avid.layers import LazyInOutMLP, Identity
-from avid.utils import ELEM_VALS, debug_structure, flax_summary, tcheck
+from avid.coord_embeddings import legendre_grid_embeds
+from avid.databatch import DataBatch
+from avid.layers import LazyInMLP
+from avid.utils import debug_structure, flax_summary, tcheck
 
 
 class Patchify(nn.Module):
@@ -150,6 +131,7 @@ class Encoder1DBlock(nn.Module):
     """
 
     num_heads: int
+    mlp: LazyInMLP
     dropout_rate: float = 0.1
     attention_dropout_rate: float = 0.1
 
@@ -181,8 +163,15 @@ class Encoder1DBlock(nn.Module):
         # MLP block.
         y = nn.LayerNorm()(x)
 
-        mlp = LazyInOutMLP(inner_dims=(), dropout_rate=self.dropout_rate)
-        y = jax.vmap(jax.vmap(lambda yy: mlp(yy, out_dim=yy.shape[-1], training=training)))(y)
+        # TODO fix ugly hack
+        mlp = LazyInMLP(
+            self.mlp.inner_dims,
+            x.shape[2],
+            self.mlp.inner_act,
+            self.mlp.final_act,
+            dropout_rate=self.mlp.dropout_rate,
+        )
+        y = jax.vmap(jax.vmap(lambda yy: mlp(yy, training=training)))(y)
 
         return x + y
 
@@ -200,6 +189,7 @@ class Encoder(nn.Module):
 
     num_layers: int
     num_heads: int
+    mlp: LazyInMLP
     dropout_rate: float = 0.1
     attention_dropout_rate: float = 0.1
 
@@ -223,6 +213,7 @@ class Encoder(nn.Module):
                 attention_dropout_rate=self.attention_dropout_rate,
                 name=f'encoderblock_{lyr}',
                 num_heads=self.num_heads,
+                mlp=self.mlp,
             )(x, training=training)
         encoded = nn.LayerNorm(name='encoder_norm')(x)
 
@@ -230,266 +221,28 @@ class Encoder(nn.Module):
 
 
 class ViTRegressor(nn.Module):
-    patch_size: int = 4
-    patch_latent_dim: int = 384
-    pos_latent_dim: int = 32
-    max_grid: int = 24
-    species_embed_head_inner_dims: tuple[int] = ()
-    species_embed_dim: int = 32
-    species_embed_dim_out: int = 64
-    downsample_factors: tuple[int] = (2,)
-    channels_out: tuple[int] = (256,)
-    kernel_sizes: tuple[int] = (3,)
-    num_layers: int = 2
-    num_heads: int = 4
-    enc_dropout_rate: float = 0.1
-    enc_attention_dropout_rate: float = 0.1
-    regressor_head_inner_dims: tuple[int] = (256,)
-    regressor_head_act: nn.Module = Identity()
-    output_dim: int = 1
+    spec_embed: nn.Module
+    downsample: nn.Module
+    im_embed: nn.Module
+    encoder: nn.Module
+    head: nn.Module
 
     @nn.compact
     def __call__(self, im: DataBatch, training: bool):
-        # pos_embed = LegendrePosEmbed(self.max_grid, self.pos_latent_dim, name='pos_embed')
-        pos_embed = AddPositionEmbs(name='pos_embed')
-        im_embed = ImageEmbed(
-            SingleImageEmbed(
-                self.patch_size, self.patch_latent_dim, self.pos_latent_dim, pos_embed
-            ),
-            name='image_embed',
-        )
-        embed_mlp = LazyInOutMLP(inner_dims=self.species_embed_head_inner_dims)
-        spec_embed = ReduceSpeciesEmbed(
-            SpeciesEmbed(
-                len(ELEM_VALS), self.species_embed_dim, self.species_embed_dim_out, embed_mlp
-            ),
-            name='species_embed',
-        )
-
-        downsamples = []
-        for downsample_factor, channel_out, kernel_size in zip(
-            self.downsample_factors, self.channels_out, self.kernel_sizes
-        ):
-            downsamples.append(
-                Downsample(
-                    downsample_factor=downsample_factor,
-                    channel_out=channel_out,
-                    kernel_size=kernel_size,
-                )
-            )
-
-        downsample = nn.Sequential(downsamples, name='downsample')
-
-        encoder = Encoder(
-            self.num_layers,
-            self.num_heads,
-            self.enc_dropout_rate,
-            self.enc_attention_dropout_rate,
-            name='encoder',
-        )
-
-        head = LazyInOutMLP(inner_dims=self.regressor_head_inner_dims, name='head')
-
-        out = spec_embed(im, training=training)
-        out = downsample(out)
-        out = im_embed(out)
-        out = encoder(out, training=training)
+        out = self.spec_embed(im, training=training)
+        out = self.downsample(out)
+        out = self.im_embed(out)
+        out = self.encoder(out, training=training)
 
         out = reduce(out, 'batch seq dim -> batch dim', 'mean')
         # debug_structure(out=out)
-        out = jax.vmap(lambda x: head(x, out_dim=self.output_dim, training=training))(out)
+        out = jax.vmap(lambda x: self.head(x, training=training))(out)
         return out
 
 
-@struct.dataclass
-class Metrics(metrics.Collection):
-    loss: metrics.Average.from_output('loss')
-    rmse: metrics.Average.from_output('rmse')
-    mae: metrics.Average.from_output('mae')
-
-
-class TrainState(train_state.TrainState):
-    metrics: Metrics
-
-
-def create_train_state(module, rng, learning_rate):
-    params = module.init(rng, DataBatch.new_empty(52, 24, 5), training=False)
-    tx = optax.chain(optax.adamw(learning_rate, weight_decay=4e-3), optax.clip_by_global_norm(1.0))
-    return TrainState.create(apply_fn=module.apply, params=params, tx=tx, metrics=Metrics.empty())
-
-
-@jax.jit
-def train_step(state: TrainState, batch: DataBatch, rng):
-    """Train for a single step."""
-    dropout_train_key = jax.random.fold_in(key=rng, data=state.step)
-
-    def loss_fn(params):
-        preds = state.apply_fn(
-            params, batch, training=True, rngs={'dropout': dropout_train_key}
-        ).squeeze()
-
-        delta = 1e-4
-        loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
-        return loss
-
-    grad_fn = jax.grad(loss_fn)
-    grads = grad_fn(state.params)
-    state = state.apply_gradients(grads=grads)
-    return state
-
-
-@jax.jit
-def compute_metrics(*, state: TrainState, batch: DataBatch):
-    preds = state.apply_fn(state.params, batch, training=False).squeeze()
-
-    delta = 1e-4
-    loss = optax.losses.huber_loss(preds, targets=batch.e_form, delta=delta).mean() / delta
-    mae = jnp.abs(preds - batch.e_form).mean()
-    rmse = jnp.sqrt(optax.losses.l2_loss(preds, batch.e_form).mean())
-    metric_updates = state.metrics.single_from_model_output(mae=mae, loss=loss, rmse=rmse)
-    metrics = state.metrics.merge(metric_updates)
-    state = state.replace(metrics=metrics)
-    return state
-
-
-@struct.dataclass
-class Checkpoint:
-    state: TrainState
-    seed: int
-    metrics_history: Mapping[str, Sequence[float]]
-    curr_epoch: float
-
-
-class TrainingRun:
-    def __init__(self, config: MainConfig):
-        self.seed = random.randint(100, 1000)
-        self.rng = jax.random.key(self.seed)
-        print(f'Seed: {self.seed}')
-        self.config = config
-
-        self.metrics_history = defaultdict(list)
-
-        self.num_epochs = config.num_epochs
-        self.steps_in_epoch, self.dl = dataloader(config, split='train', infinite=True)
-        self.steps_in_test_epoch, self.test_dl = dataloader(config, split='valid', infinite=True)
-        self.num_steps = self.steps_in_epoch * self.num_epochs
-        self.steps = range(self.num_steps)
-        self.curr_step = 0
-        self.start_time = time.monotonic()
-        warmup_steps = self.steps_in_epoch * min(5, self.num_epochs // 2)
-        base_lr = config.train.base_lr
-        min_lr = base_lr / 10
-        if config.train.lr_schedule == 'cosine':
-            self.scheduler = optax.warmup_cosine_decay_schedule(
-                init_value=min_lr,
-                peak_value=base_lr,
-                warmup_steps=warmup_steps,
-                end_value=min_lr,
-                decay_steps=self.num_steps,
-            )
-        elif config.train.lr_schedule == 'finder':
-            self.scheduler = optax.linear_schedule(min_lr, base_lr * 10, self.num_steps)
-        else:
-            raise ValueError(f'Disallowed lr schedule {config.train.lr_schedule}')
-        self.state = create_train_state(ViTRegressor(), self.rng, self.scheduler)
-
-        opts = ocp.CheckpointManagerOptions(
-            save_interval_steps=1,
-            best_fn=lambda metrics: metrics['test_loss'],
-            best_mode='min',
-            max_to_keep=4,
-            enable_async_checkpointing=False,
-            keep_time_interval=timedelta(minutes=30),
-        )
-        self.mngr = ocp.CheckpointManager(
-            ocp.test_utils.create_empty('/tmp/jax_ckpt'),
-            options=opts,
-        )
-
-        self.test_loss = 1000
-
-    def next_step(self):
-        return self.step(self.curr_step + 1, next(self.dl))
-
-    def step(self, step, batch):
-        self.curr_step = step
-        if step >= self.num_steps:
-            return None
-
-        self.state = train_step(
-            self.state, batch, self.rng
-        )  # get updated train state (which contains the updated parameters)
-        self.state = compute_metrics(state=self.state, batch=batch)  # aggregate batch metrics
-
-        if self.should_log or self.should_ckpt:  # one training epoch has passed
-            for metric, value in self.state.metrics.compute().items():  # compute metrics
-                self.metrics_history[f'train_{metric}'].append(value.item())  # record metrics
-
-                if not self.should_ckpt:
-                    self.metrics_history[f'test_{metric}'].append(1)
-
-            self.state = self.state.replace(
-                metrics=self.state.metrics.empty()
-            )  # reset train_metrics for next training epoch
-
-            self.metrics_history['lr'].append(self.lr)
-            self.metrics_history['step'].append(self.curr_step)
-            self.metrics_history['epoch'].append(self.curr_step / self.steps_in_epoch)
-            self.metrics_history['rel_mins'].append((time.monotonic() - self.start_time) / 60)
-
-        if self.should_ckpt:
-            # Compute metrics on the test set after each training epoch
-            self.test_state = self.state
-            for _i, test_batch in zip(range(self.steps_in_test_epoch), self.test_dl):
-                self.test_state = compute_metrics(state=self.test_state, batch=test_batch)
-
-            for metric, value in self.test_state.metrics.compute().items():
-                self.metrics_history[f'test_{metric}'].append(value.item())
-                if f'{metric}' == 'loss':
-                    self.test_loss = value.item()
-            self.mngr.save(
-                self.curr_step,
-                args=ocp.args.StandardSave(self.ckpt()),
-                metrics={'test_loss': self.test_loss},
-            )
-            self.mngr.wait_until_finished()
-
-        return self
-
-    def step_until_done(self):
-        for step, batch in zip(self.steps, self.dl):
-            yield self.step(step, batch)
-
-    def run_to_completion(self):
-        for step, batch in zip(self.steps, self.dl):
-            self.step(step, batch)
-
-    @property
-    def should_log(self):
-        return (self.curr_step + 1) % (self.steps_in_epoch // self.config.log.logs_per_epoch) == 0
-
-    @property
-    def should_ckpt(self):
-        return (self.curr_step + 1) % (2 * self.steps_in_epoch) == 0
-
-    @property
-    def lr(self):
-        return self.scheduler(self.curr_step).item() * 100.0
-
-    def ckpt(self):
-        """Checkpoint PyTree."""
-        return Checkpoint(
-            self.state, self.seed, self.metrics_history, self.curr_step / self.steps_in_epoch
-        )
-
-    def save_final(self, out_dir: str | PathLike):
-        """Save final model to directory."""
-        self.mngr.wait_until_finished()
-        copytree(self.mngr.directory, Path(out_dir) / 'ckpts/')
-
-
 if __name__ == '__main__':
-    from avid.training_runner import run_using_dashboard, run_using_progress
+    from avid.config import MainConfig
+    from avid.dataset import load_file
 
     config = pyrallis.argparsing.parse(MainConfig, 'configs/smoke_test.toml')
 
@@ -498,7 +251,7 @@ if __name__ == '__main__':
 
     kwargs = dict(training=False)
     batch = load_file(config, 0)
-    mod = ViTRegressor()
+    mod = config.vit.build()
     out, params = mod.init_with_output(jax.random.key(0), im=batch, **kwargs)
     debug_structure(batch=batch, module=mod, out=out)
     flax_summary(mod, batch, **kwargs)

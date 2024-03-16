@@ -1,17 +1,14 @@
 """Module to store different approaches to embed the position."""
 
 from itertools import product
-import logging
-import equinox as eqx
+
 import jax.numpy as jnp
-import jax
-from jaxtyping import PyTree, Float, Array
-import pyrallis
-from scipy.special import lpmv
 import numpy as np
+import pyrallis
 from einops import rearrange
-from avid.config import MainConfig
-from avid.utils import debug_stat, debug_structure, tcheck
+from scipy.special import lpmv
+
+from avid.utils import debug_stat, debug_structure
 
 
 def legendre_first_kind(xyz, m: np.int64, n: np.int64):
@@ -52,6 +49,8 @@ def legendre_grid_embeds(ng: int, dim_embed: int):
 
 
 if __name__ == '__main__':
+    from avid.config import MainConfig
+
     config = pyrallis.parse(config_class=MainConfig)
     config.cli.set_up_logging()
     from einops import rearrange

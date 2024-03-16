@@ -1,5 +1,5 @@
 [tool.ruff]
-extend-include = ["*.ipynb"]
+include = ["avid/**/*.py", "notebooks/**/*.ipynb"]
 
 
 line-length = 100

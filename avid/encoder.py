@@ -1,16 +1,16 @@
 """Encoder/decoder for crystal data."""
 
 from typing import Callable
-from einops import rearrange
+
 import jax
 import jax.numpy as jnp
-from jaxtyping import Float, Array, Int, Bool
+from einops import rearrange
 from flax import linen as nn
+from jaxtyping import Array, Bool, Float, Int
 
-from avid.config import MainConfig
-from avid.dataset import DataBatch, load_file
+from avid.databatch import DataBatch
+from avid.layers import LazyInMLP
 from avid.utils import ELEM_VALS, debug_structure, flax_summary, tcheck
-from avid.layers import Identity, LazyInOutMLP
 
 
 class SpeciesEmbed(nn.Module):
@@ -18,8 +18,7 @@ class SpeciesEmbed(nn.Module):
 
     n_species: int
     species_embed_dim: int
-    dim_out: int
-    embed_module: LazyInOutMLP
+    embed_module: LazyInMLP
 
     @tcheck
     @nn.compact
@@ -29,11 +28,11 @@ class SpeciesEmbed(nn.Module):
         spec: Int[Array, ''],
         mask: Bool[Array, ''],
         training: bool,
-    ) -> Float[Array, '_dim_out']:
+    ):
         spec_embed = nn.Embed(self.n_species, self.species_embed_dim, name='species_embed')
 
         input_embeds = jnp.concat([spec_embed(spec), x[..., None]], axis=-1)
-        return self.embed_module(input_embeds, self.dim_out, training) * mask.astype(jnp.float32)
+        return self.embed_module(input_embeds, training) * mask.astype(jnp.float32)
 
 
 class ReduceSpeciesEmbed(nn.Module):
@@ -91,8 +90,11 @@ class Downsample(nn.Module):
 
 
 if __name__ == '__main__':
+    from avid.config import MainConfig
+    from avid.dataset import load_file
+
     config = MainConfig()
-    embed_mlp = LazyInOutMLP(
+    embed_mlp = LazyInMLP(
         inner_dims=(32,),
     )
     spec_embed = SpeciesEmbed(

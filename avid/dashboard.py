@@ -2,40 +2,25 @@
 
 """A longer-form example of using textual-plotext."""
 
-from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from itertools import cycle
-from json import loads
-from math import e
-from pathlib import Path
-import random
 import time
-from typing import Any, Coroutine, Mapping, Sequence
-from urllib.error import URLError
-from urllib.request import Request, urlopen
+from itertools import cycle
+from typing import Any
 
 import jax
 import numpy as np
 import pandas as pd
 import pyrallis
-from textual import on, work
+import rho_plus as rp
 from textual.app import App, ComposeResult
 from textual.containers import Grid
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Footer, Header, Markdown, DataTable
-from textual.worker import get_current_worker, Worker
-from typing_extensions import Final
-import rho_plus as rp
-from rich.table import Table
-
+from textual.widgets import DataTable, Footer, Header
+from textual.worker import get_current_worker
 from textual_plotext import PlotextPlot
 
 from avid.config import MainConfig
-from avid.e_form_predictor import TrainingRun
-from avid.utils import debug_structure
+from avid.training_state import TrainingRun
 
 
 class Losses(PlotextPlot):
@@ -240,30 +225,14 @@ class Dashboard(App):
         return super().watch_dark(dark)
 
     def finish(self, state: TrainingRun):
-        if self._config.log.exp_name is None:
-            now = datetime.now()
-            exp_name = now.strftime('%m-%d-%H')
-        else:
-            exp_name = self._config.log.exp_name
-
-        folder = Path('logs/') / f'{exp_name}_{state.seed}'
-        folder.mkdir(exist_ok=True)
-
-        pd.DataFrame(state.metrics_history).to_feather(folder / 'metrics.feather')
-
-        with open(folder / 'config.toml', 'w') as outfile:
-            pyrallis.cfgparsing.dump(self._config, outfile)
-
+        folder = state.finish()
         self.title = 'Finished in {:.1f} minutes, saved to {}'.format(
             max(state.metrics_history['rel_mins']), folder
         )
 
-        state.save_final(folder / 'final_ckpt')
-
 
 if __name__ == '__main__':
     config = pyrallis.argparsing.parse(MainConfig)
-    from rich.pretty import pprint
 
     # with jax.profiler.trace('/tmp/jax-trace', create_perfetto_link=True):
     if config.do_profile:

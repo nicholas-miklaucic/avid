@@ -1,0 +1,23 @@
+[vit.head]
+out_dim = 1
+
+[vit.head.activation]
+name = "relu"
+
+[vit.head.final_activation]
+name = "Identity"
+
+[vit.species_embed.spec_embed]
+out_dim = 64
+
+[vit.encoder.mlp.activation]
+name = "relu"
+
+[vit.encoder.mlp.final_activation]
+name = "Identity"
+
+[vit.species_embed.spec_embed.activation]
+name = "relu"
+
+[vit.species_embed.spec_embed.final_activation]
+name = "Identity"

@@ -2,15 +2,15 @@
 
 from os import PathLike
 from pathlib import Path
-import pyrallis
-from avid.config import MainConfig
-import orbax.checkpoint as ocp
-from avid.e_form_predictor import Checkpoint, TrainState, TrainingRun
 
+import orbax.checkpoint as ocp
+import pyrallis
+
+from avid.config import MainConfig
 from avid.utils import debug_structure
 
 
-def best_ckpt(run_dir: PathLike) -> Checkpoint:
+def best_ckpt(run_dir: PathLike):
     with open(Path(run_dir) / 'config.toml') as conf_file:
         config = pyrallis.cfgparsing.load(MainConfig, conf_file)
 
@@ -25,13 +25,13 @@ def best_ckpt(run_dir: PathLike) -> Checkpoint:
         ),
     )
 
-    run = TrainingRun(config)
-
-    model = mngr.restore(mngr.best_step(), args=ocp.args.StandardRestore(run.ckpt()))
+    model = mngr.restore(mngr.best_step())
     return model
 
 
 if __name__ == '__main__':
+    from avid.e_form_predictor import TrainingRun
+
     run_dir = Path('logs') / 'e_form_mae_481'
 
     with open(run_dir / 'config.toml') as conf_file:
@@ -50,5 +50,8 @@ if __name__ == '__main__':
 
     run = TrainingRun(config)
 
-    model = mngr.restore(mngr.best_step(), args=ocp.args.StandardRestore(run.ckpt()))
+    model = mngr.restore(
+        mngr.best_step(),
+        # args=ocp.args.StandardRestore(Checkpoint(run.state, run.seed, run.metrics_history, 0)),
+    )
     debug_structure(model=model)

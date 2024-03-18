@@ -12,8 +12,10 @@ def run_using_dashboard(config: MainConfig):
     return run
 
 
-def run_using_progress(config: MainConfig, run):
+def run_using_progress(config: MainConfig):
     import rich.progress as prog
+
+    run = TrainingRun(config)
 
     update_every = 1
     with prog.Progress(
@@ -34,11 +36,14 @@ def run_using_progress(config: MainConfig, run):
             if run_state.curr_step % update_every == 0:
                 progress.advance(task)
 
-            if run_state.epoch_just_finished:
+            if run_state.should_log:
                 status = []
                 for k, v in run_state.metrics_history.items():
-                    status.append(f'{k}={v[-1]:4.02f}')
+                    if k.endswith('loss'):
+                        status.append(f'{k}={v[-1]:4.02f}')
 
-                progress.update(task, description=''.join(status))
+                progress.update(task, description=' '.join(status))
 
+    print('Saved to:')
+    print(run.finish().absolute())
     return run

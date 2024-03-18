@@ -150,7 +150,6 @@ def tree_traverse(visitor: AbstractTreeVisitor, obj, max_depth=2, collapse_singl
                 if (k, v) not in excluded
             }
     elif is_dataclass(obj):
-        print(obj)
         return {obj.__class__.__name__: tree_traverse(visitor, asdict(obj), max_depth)}
     else:
         name = getattr(obj, '__name__', '|')

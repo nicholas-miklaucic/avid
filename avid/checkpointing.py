@@ -30,7 +30,7 @@ def best_ckpt(run_dir: PathLike):
 
 
 if __name__ == '__main__':
-    from avid.e_form_predictor import TrainingRun
+    from avid.vit import TrainingRun
 
     run_dir = Path('logs') / 'e_form_mae_481'
 

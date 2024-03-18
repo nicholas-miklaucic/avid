@@ -2,13 +2,13 @@
 representation."""
 
 import equinox as eqx
-import pyrallis
-from pymatgen.core import Structure
-from rich.prompt import Confirm
-from rich.progress import track
-import pandas as pd
 import jax.numpy as jnp
-from jaxtyping import Float, Array
+import pandas as pd
+import pyrallis
+from jaxtyping import Array, Float
+from pymatgen.core import Structure
+from rich.progress import track
+from rich.prompt import Confirm
 
 from avid.config import MainConfig
 

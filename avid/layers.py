@@ -2,6 +2,7 @@
 
 from typing import Callable, Optional
 
+import jax.numpy as jnp
 from flax import linen as nn
 from jaxtyping import Array, Float
 
@@ -37,12 +38,16 @@ class LazyInMLP(nn.Module):
             out_dim = self.out_dim
 
         for next_dim in self.inner_dims:
-            x = nn.Dense(next_dim, kernel_init=self.kernel_init, bias_init=self.bias_init)(x)
+            x = nn.Dense(
+                next_dim, kernel_init=self.kernel_init, bias_init=self.bias_init, dtype=jnp.bfloat16
+            )(x)
             x = self.inner_act(x)
             x = nn.Dropout(self.dropout_rate, deterministic=not training)(x)
             x = nn.LayerNorm()(x)
             _curr_dim = next_dim
 
-        x = nn.Dense(out_dim, kernel_init=self.kernel_init, bias_init=self.bias_init)(x)
+        x = nn.Dense(
+            out_dim, kernel_init=self.kernel_init, bias_init=self.bias_init, dtype=jnp.bfloat16
+        )(x)
         x = self.final_act(x)
         return x

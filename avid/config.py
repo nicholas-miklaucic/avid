@@ -5,23 +5,22 @@ from typing import Callable, Optional
 
 import jax
 import optax
-import orbax
 import pyrallis
 from flax import linen as nn
 from flax.struct import dataclass
 from pyrallis import field
 
 from avid import layers
-from avid.e_form_predictor import (
+from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
+from avid.layers import Identity, LazyInMLP
+from avid.utils import ELEM_VALS
+from avid.vit import (
     AddPositionEmbs,
     Encoder,
     ImageEmbed,
     SingleImageEmbed,
     ViTRegressor,
 )
-from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
-from avid.layers import Identity, LazyInMLP
-from avid.utils import ELEM_VALS
 
 pyrallis.set_config_type('toml')
 
@@ -68,12 +67,27 @@ class DataConfig:
     # Folder of processed data files.
     data_folder: Path = Path('precomputed/')
 
+    # Seed for dataset shuffling. Controls the order batches are given to train.
+    shuffle_seed: int = 1618
+
     # Train split.
-    train_split: int = 6
+    train_split: int = 8
     # Test split.
-    test_split: int = 0
-    # Valid split:
-    valid_split: int = 1
+    test_split: int = 3
+    # Valid split.
+    valid_split: int = 3
+
+    # Data augmentations
+    # If False, disables all augmentations.
+    do_augment: bool = True
+    # Random seed for augmentations.
+    augment_seed: int = 12345
+    # Whether to apply SO(3) augmentations: proper rotations
+    so3: bool = True
+    # Whether to apply O(3) augmentations: includes SO(3) and also reflections.
+    o3: bool = True
+    # Whether to apply T(3) augmentations: origin shifts.
+    t3: bool = True
 
 
 class LoggingLevel(Enum):
@@ -98,8 +112,8 @@ class CLIConfig:
         from rich.pretty import install as pretty_install
         from rich.traceback import install as traceback_install
 
-        pretty_install()
-        traceback_install(suppress=(orbax))
+        pretty_install(crop=True)
+        traceback_install()
 
         logging.basicConfig(
             level=self.verbosity.value,
@@ -134,6 +148,11 @@ class DeviceConfig:
             return jax.sharding.PositionalSharding(devs)
         else:
             return devs[0]
+
+    def __post_init__(self):
+        import os
+
+        os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 
 @dataclass
@@ -309,6 +328,9 @@ class DownsampleConfig:
                 raise ValueError(msg)
 
     def build(self) -> nn.Module:
+        if len(self.factor) == 0:
+            return Identity()
+
         downsamples = []
         for factor, channels, kernel in zip(self.factor, self.channels_out, self.kernel_size):
             downsamples.append(Downsample(factor, channels, kernel))
@@ -321,26 +343,41 @@ class ViTRegressorConfig:
 
     vit_input: ViTInputConfig = field(default_factory=ViTInputConfig)
     encoder: ViTEncoderConfig = field(default_factory=ViTEncoderConfig)
-    head: MLPConfig = field(default=MLPConfig(out_dim=1))
+    head: MLPConfig = field(default_factory=MLPConfig)
     species_embed: SpeciesEmbedConfig = field(default_factory=SpeciesEmbedConfig)
     downsample: DownsampleConfig = field(default_factory=DownsampleConfig)
+    out_dim: int = 1
 
     def build(self) -> ViTRegressor:
+        head = self.head.build()
+        head.out_dim = self.out_dim
         return ViTRegressor(
             spec_embed=self.species_embed.build(),
             downsample=self.downsample.build(),
-            head=self.head.build(),
+            head=head,
             encoder=self.encoder.build(),
             im_embed=self.vit_input.build(),
         )
 
 
 @dataclass
-class TrainingConfig:
-    """Training/optimizer parameters."""
+class LossConfig:
+    """Config defining the loss function."""
 
     # delta for smooth_l1_loss. delta = 0 is L1 loss, and high delta behaves like L2 loss.
     loss_delta: float = 0.1
+
+    def regression_loss(self, preds, targets):
+        loss = optax.losses.huber_loss(preds, targets, delta=self.loss_delta) / self.loss_delta
+        return loss.mean()
+
+
+@dataclass
+class TrainingConfig:
+    """Training/optimizer parameters."""
+
+    # Loss function.
+    loss: LossConfig = field(default_factory=LossConfig)
 
     # Learning rate schedule: 'cosine' for warmup+cosine annealing, 'finder' for a linear schedule
     # that goes up to 20 times the base learning rate.
@@ -394,10 +431,6 @@ class TrainingConfig:
             ),
             optax.clip_by_global_norm(self.max_grad_norm),
         )
-
-    def regression_loss(self, preds, targets):
-        loss = optax.losses.huber_loss(preds, targets, delta=self.loss_delta) / self.loss_delta
-        return loss.mean()
 
 
 @dataclass

@@ -1,302 +1,273 @@
-"""Vision transformer modules. https://docs.kidger.site/equinox/examples/vision_transformer/"""
+"""Simple module to predict e_form from latent representation. A quick way to benchmark an
+encoder."""
 
-import functools
+from typing import Callable
 
-import einops  # https://github.com/arogozhnikov/einops
-import equinox as eqx
 import jax
 import jax.numpy as jnp
-import jax.random as jr
-import numpy as np
 import pyrallis
-from avid.config import MainConfig
-from avid.dataset import dataloader, num_elements_class
-import optax  # https://github.com/deepmind/optax
-import plotext as plt
+from einops import rearrange, reduce
+from flax import linen as nn
+from jaxtyping import Array, Float
 
-from jaxtyping import Array, Float, PRNGKeyArray
-
-
-config = pyrallis.parse(MainConfig)
-config.cli.set_up_logging()
-
-# Hyperparameters
-lr = 0.0001
-dropout_rate = 0.1
-beta1 = 0.9
-beta2 = 0.999
-batch_size = config.batch_size
-patch_size = 6
-num_patches = 64
-num_steps = 3_000
-image_size = tuple([config.voxelizer.n_grid] * 3)
-embedding_dim = 512
-hidden_dim = 256
-num_heads = 8
-num_layers = 6
-height, width, channels = image_size
-num_classes = 4
+from avid.coord_embeddings import legendre_grid_embeds
+from avid.databatch import DataBatch
+from avid.encoder import ReduceSpeciesEmbed
+from avid.layers import LazyInMLP
+from avid.utils import debug_structure, flax_summary, tcheck
 
 
-class PatchEmbedding(eqx.Module):
-    linear: eqx.nn.Embedding
+class Patchify(nn.Module):
+    """Patchify block in 3D, with lazy patch size."""
+
+    dim_out: int
+    kernel_init: Callable = nn.initializers.xavier_normal()
+    bias_init: Callable = nn.initializers.normal()
+
+    @tcheck
+    @nn.compact
+    def __call__(self, patch: Float[Array, 'p p p chan_in']) -> Float[Array, '_dimout']:
+        patch = rearrange(patch, 'p1 p2 p3 chan_in -> (p1 p2 p3 chan_in)')
+
+        patch_embed = nn.Dense(
+            self.dim_out,
+            kernel_init=self.kernel_init,
+            bias_init=self.bias_init,
+            name='patch_proj',
+            dtype=jnp.bfloat16,
+        )
+
+        return patch_embed(patch)
+
+
+class AddPositionEmbs(nn.Module):
+    """Adds learned positional embeddings to the inputs.
+
+    Attributes:
+    posemb_init: positional embedding initializer.
+    """
+
+    posemb_init: Callable = nn.initializers.normal(stddev=0.02, dtype=jnp.bfloat16)
+
+    @nn.compact
+    def __call__(self, inputs):
+        """Applies the AddPositionEmbs module.
+
+        Args:
+            inputs: Inputs to the layer.
+
+        Returns:
+            Output tensor with shape `(timesteps, in_dim)`.
+        """
+        pos_emb_shape = inputs.shape
+        pe = self.param('pos_embedding', self.posemb_init, pos_emb_shape)
+        return inputs + pe
+
+
+class LegendrePosEmbed(nn.Module):
+    """Module to apply fixed Legendre positional encodings."""
+
+    max_input_size: int
+    dim_embed: int
+
+    @tcheck
+    @nn.compact
+    def __call__(
+        self, patches: Float[Array, 'I I I patch_d']
+    ) -> Float[Array, 'I I I _patchd_posd']:
+        embed = self.param(
+            'embed', lambda *args: legendre_grid_embeds(patches.shape[0], self.dim_embed)
+        )
+        step = embed.shape[0] // patches.shape[0]
+        return jnp.concat([patches, embed[::step, ::step, ::step, :]], axis=-1)
+
+
+class SingleImageEmbed(nn.Module):
+    """Embeds a 3D image into a sequnce of tokens."""
+
     patch_size: int
+    patch_latent_dim: int
+    pos_latent_dim: int
+    pos_embed: nn.Module
 
-    def __init__(
-        self,
-        input_channels: int,
-        output_shape: int,
-        patch_size: int,
-        key: PRNGKeyArray,
-    ):
-        self.patch_size = patch_size
+    @tcheck
+    @nn.compact
+    def __call__(self, im: Float[Array, 'I I I C']) -> Float[Array, '_ip3 _dimout']:
+        i = im.shape[0]
+        p = self.patch_size
+        c = im.shape[-1]
+        assert i % p == 0
+        n = i // p
 
-        self.linear = eqx.nn.Linear(
-            self.patch_size**2 * input_channels,
-            output_shape,
-            key=key,
+        patches = im.reshape(n, p, n, p, n, p, c)
+        patches = rearrange(patches, 'n1 p1 n2 p2 n3 p3 c -> (n1 n2 n3) p1 p2 p3 c')
+
+        embed = jax.vmap(Patchify(self.patch_latent_dim))(patches)
+        # legendre
+        # pos_embed = self.pos_embed(rearrange(embed, '(i1 i2 i3) c -> i1 i2 i3 c', i1=n, i2=n,
+        # i3=n))
+        # return rearrange(pos_embed, 'i1 i2 i3 c -> (i1 i2 i3) c', i1=n, i2=n, i3=n)
+
+        # learned
+        pos_embed = self.pos_embed(embed)
+        return pos_embed
+
+
+class ImageEmbed(nn.Module):
+    inner: SingleImageEmbed
+
+    @tcheck
+    @nn.compact
+    def __call__(self, im: Float[Array, 'batch I I I C']) -> Float[Array, 'batch _ip3 _dim_out']:
+        return jax.vmap(self.inner)(im)
+
+
+class Encoder1DBlock(nn.Module):
+    """Transformer encoder layer.
+
+    Attributes:
+      inputs: input data.
+      mlp_dim: dimension of the mlp on top of attention block.
+      dtype: the dtype of the computation (default: float32).
+      dropout_rate: dropout rate.
+      attention_dropout_rate: dropout for attention heads.
+      deterministic: bool, deterministic or not (to apply dropout).
+      num_heads: Number of heads in nn.MultiHeadDotProductAttention
+    """
+
+    num_heads: int
+    mlp: LazyInMLP
+    dropout_rate: float = 0.1
+    attention_dropout_rate: float = 0.1
+
+    @nn.compact
+    def __call__(self, inputs, abys, *, training: bool):
+        """Applies Encoder1DBlock module.
+
+        abys is a six-element array α1, β1, γ1, α2, β2, γ2, that applies affine scaling.
+        [1, 0, 1, 1, 0, 1] is the identity. Of shape 6 1 1 dim_tok, or 6 1 1 1.
+        """
+
+        a1, b1, y1, a2, b2, y2 = abys
+
+        # Attention block.
+        assert inputs.ndim == 3, f'Expected (batch, seq, hidden) got {inputs.shape}'
+        # zero out initializations: will just apply the identity function at first
+        x = nn.LayerNorm(scale_init=nn.zeros, dtype=inputs.dtype)(inputs)
+        x = x * y1 + b1
+        x = nn.MultiHeadDotProductAttention(
+            kernel_init=nn.initializers.xavier_uniform(),
+            broadcast_dropout=False,
+            deterministic=not training,
+            dropout_rate=self.attention_dropout_rate,
+            num_heads=self.num_heads,
+            dtype=jnp.bfloat16,
+        )(x, x)
+        x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not training)
+        x = x * a1
+        x = x + inputs
+
+        # MLP block.
+        y = nn.LayerNorm(scale_init=nn.zeros, dtype=x.dtype)(x)
+        y = y * y2 + b2
+
+        # TODO fix ugly hack
+        mlp = LazyInMLP(
+            self.mlp.inner_dims,
+            x.shape[2],
+            self.mlp.inner_act,
+            self.mlp.final_act,
+            dropout_rate=self.mlp.dropout_rate,
         )
+        y = jax.vmap(jax.vmap(lambda yy: mlp(yy, training=training)))(y)
+        y = y * a2
 
-    def __call__(
-        self, x: Float[Array, 'channels height width']
-    ) -> Float[Array, 'num_patches embedding_dim']:
-        x = einops.rearrange(
-            x,
-            'c (h ph) (w pw) -> (h w) (c ph pw)',
-            ph=self.patch_size,
-            pw=self.patch_size,
-        )
-        x = jax.vmap(self.linear)(x)
-
-        return x
+        return x + y
 
 
-class AttentionBlock(eqx.Module):
-    layer_norm1: eqx.nn.LayerNorm
-    layer_norm2: eqx.nn.LayerNorm
-    attention: eqx.nn.MultiheadAttention
-    linear1: eqx.nn.Linear
-    linear2: eqx.nn.Linear
-    dropout1: eqx.nn.Dropout
-    dropout2: eqx.nn.Dropout
+class Encoder(nn.Module):
+    """Transformer Model Encoder for sequence to sequence translation.
 
-    def __init__(
-        self,
-        input_shape: int,
-        hidden_dim: int,
-        num_heads: int,
-        dropout_rate: float,
-        key: PRNGKeyArray,
-    ):
-        key1, key2, key3 = jr.split(key, 3)
+    Attributes:
+      num_layers: number of layers
+      mlp_dim: dimension of the mlp on top of attention block
+      num_heads: Number of heads in nn.MultiHeadDotProductAttention
+      dropout_rate: dropout rate.
+      attention_dropout_rate: dropout rate in self attention.
+    """
 
-        self.layer_norm1 = eqx.nn.LayerNorm(input_shape)
-        self.layer_norm2 = eqx.nn.LayerNorm(input_shape)
-        self.attention = eqx.nn.MultiheadAttention(num_heads, input_shape, key=key1)
-
-        self.linear1 = eqx.nn.Linear(input_shape, hidden_dim, key=key2)
-        self.linear2 = eqx.nn.Linear(hidden_dim, input_shape, key=key3)
-        self.dropout1 = eqx.nn.Dropout(dropout_rate)
-        self.dropout2 = eqx.nn.Dropout(dropout_rate)
-
-    def __call__(
-        self,
-        x: Float[Array, 'num_patches embedding_dim'],
-        enable_dropout: bool,
-        key: PRNGKeyArray,
-    ) -> Float[Array, 'num_patches embedding_dim']:
-        input_x = jax.vmap(self.layer_norm1)(x)
-        x = x + self.attention(input_x, input_x, input_x)
-
-        input_x = jax.vmap(self.layer_norm2)(x)
-        input_x = jax.vmap(self.linear1)(input_x)
-        input_x = jax.nn.gelu(input_x)
-
-        key1, key2 = jr.split(key, num=2)
-
-        input_x = self.dropout1(input_x, inference=not enable_dropout, key=key1)
-        input_x = jax.vmap(self.linear2)(input_x)
-        input_x = self.dropout2(input_x, inference=not enable_dropout, key=key2)
-
-        x = x + input_x
-
-        return x
-
-
-class VisionTransformer(eqx.Module):
-    patch_embedding: PatchEmbedding
-    positional_embedding: jnp.ndarray
-    cls_token: jnp.ndarray
-    attention_blocks: list[AttentionBlock]
-    dropout: eqx.nn.Dropout
-    mlp: eqx.nn.Sequential
     num_layers: int
+    num_heads: int
+    mlp: LazyInMLP
+    dropout_rate: float = 0.1
+    attention_dropout_rate: float = 0.1
 
-    def __init__(
-        self,
-        embedding_dim: int,
-        hidden_dim: int,
-        num_heads: int,
-        num_layers: int,
-        dropout_rate: float,
-        patch_size: int,
-        num_patches: int,
-        num_classes: int,
-        key: PRNGKeyArray,
-    ):
-        key1, key2, key3, key4, key5 = jr.split(key, 5)
+    @nn.compact
+    def __call__(self, x, abys, *, training: bool):
+        """Applies Transformer model on the inputs.
 
-        self.patch_embedding = PatchEmbedding(channels, embedding_dim, patch_size, key1)
+        Args:
+          x: Inputs to the layer.
+          abys: Affine scaling.
+          train: Set to `True` when training.
 
-        self.positional_embedding = jr.normal(key2, (num_patches + 1, embedding_dim))
+        Returns:
+          output of a transformer encoder.
+        """
+        assert x.ndim == 3  # (batch, len, emb)
 
-        self.cls_token = jr.normal(key3, (1, embedding_dim))
+        # Input Encoder
+        for lyr in range(self.num_layers):
+            x = Encoder1DBlock(
+                dropout_rate=self.dropout_rate,
+                attention_dropout_rate=self.attention_dropout_rate,
+                name=f'encoderblock_{lyr}',
+                num_heads=self.num_heads,
+                mlp=self.mlp,
+            )(x, abys, training=training)
+        encoded = nn.LayerNorm(name='encoder_norm', dtype=x.dtype)(x)
 
-        self.num_layers = num_layers
-
-        self.attention_blocks = [
-            AttentionBlock(embedding_dim, hidden_dim, num_heads, dropout_rate, key4)
-            for _ in range(self.num_layers)
-        ]
-
-        self.dropout = eqx.nn.Dropout(dropout_rate)
-
-        self.mlp = eqx.nn.Sequential(
-            [
-                eqx.nn.LayerNorm(embedding_dim),
-                eqx.nn.Linear(embedding_dim, num_classes, key=key5),
-            ]
-        )
-
-    def __call__(
-        self,
-        x: Float[Array, 'channels height width'],
-        enable_dropout: bool,
-        key: PRNGKeyArray,
-    ) -> Float[Array, 'num_classes']:
-        x = self.patch_embedding(x)
-
-        x = jnp.concatenate((self.cls_token, x), axis=0)
-
-        x += self.positional_embedding[
-            : x.shape[0]
-        ]  # Slice to the same length as x, as the positional embedding may be longer.
-
-        dropout_key, *attention_keys = jr.split(key, num=self.num_layers + 1)
-
-        x = self.dropout(x, inference=not enable_dropout, key=dropout_key)
-
-        for block, attention_key in zip(self.attention_blocks, attention_keys):
-            x = block(x, enable_dropout, key=attention_key)
-
-        x = x[0]  # Select the CLS token.
-        x = self.mlp(x)
-
-        return x
+        return encoded
 
 
-@eqx.filter_value_and_grad
-def compute_grads(model: VisionTransformer, images: jnp.ndarray, labels: jnp.ndarray, key):
-    logits = jax.vmap(model, in_axes=(0, None, 0))(images, True, key)
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
-
-    return jnp.mean(loss)
+ABY_IDENTITY = jnp.array([1, 0, 1, 1, 0, 1]).reshape(6, 1, 1, 1)
 
 
-@eqx.filter_jit
-def step_model(
-    model: VisionTransformer,
-    optimizer: optax.GradientTransformation,
-    state: optax.OptState,
-    images: jnp.ndarray,
-    labels: jnp.ndarray,
-    key,
-):
-    loss, grads = compute_grads(model, images, labels, key)
-    updates, new_state = optimizer.update(grads, state, model)
+class ViTRegressor(nn.Module):
+    spec_embed: ReduceSpeciesEmbed
+    downsample: nn.Module
+    im_embed: ImageEmbed
+    encoder: Encoder
+    head: LazyInMLP
 
-    model = eqx.apply_updates(model, updates)
+    @nn.compact
+    def __call__(self, im: DataBatch, training: bool, abys=ABY_IDENTITY):
+        out = self.spec_embed(im, training=training)
+        out = self.downsample(out)
+        out = self.im_embed(out)
+        out = self.encoder(out, abys, training=training)
 
-    return model, new_state, loss
+        out = reduce(out, 'batch seq dim -> batch dim', 'mean')
+        # debug_structure(out=out)
+        out = jax.vmap(lambda x: self.head(x, training=training))(out)
+        return out
 
-
-def train(
-    model: VisionTransformer,
-    optimizer: optax.GradientTransformation,
-    state: optax.OptState,
-    data_loader,
-    num_steps: int,
-    key=None,
-):
-    losses = []
-
-    for step, batch in zip(range(num_steps), data_loader):
-        key, *subkeys = jr.split(key, num=config.batch_size + 1)
-        subkeys = jnp.array(subkeys)
-
-        dens_img = einops.rearrange(
-            batch['density'], 'batch (h w c) -> batch h w c', h=height, w=width, c=channels
-        )
-
-        (model, state, loss) = step_model(
-            model, optimizer, state, dens_img, batch['n_elements_label'], subkeys
-        )
-
-        losses.append(loss.item())
-
-        print_every = num_steps // 20
-        if (step + 1) % print_every == 0:
-            plt.plot(np.arange(step), losses)
-            plt.title('Loss')
-            plt.show()
-            plt.clear_figure()
-
-    return model, state, losses
-
-
-key = jr.PRNGKey(2003)
-
-model = VisionTransformer(
-    embedding_dim=embedding_dim,
-    hidden_dim=hidden_dim,
-    num_heads=num_heads,
-    num_layers=num_layers,
-    dropout_rate=dropout_rate,
-    patch_size=patch_size,
-    num_patches=num_patches,
-    num_classes=num_classes,
-    key=key,
-)
-
-optimizer = optax.adamw(
-    learning_rate=lr,
-    b1=beta1,
-    b2=beta2,
-)
-
-
-state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
 if __name__ == '__main__':
-    from rich.prompt import Confirm
+    from avid.config import MainConfig
+    from avid.dataset import load_file
 
-    if Confirm.ask('Train from scratch?'):
-        model, state, losses = train(
-            model, optimizer, state, dataloader(config), num_steps, key=key
-        )
+    config = pyrallis.argparsing.parse(MainConfig, 'configs/smoke_test.toml')
 
-        eqx.tree_serialise_leaves('models/vit_num_elems1.eqx', model)
-    else:
-        model = eqx.tree_deserialise_leaves('models/vit_num_elems1.eqx', model)
+    if config.do_profile:
+        jax.profiler.start_trace('/tmp/jax-trace', create_perfetto_link=True)
 
-    accuracies = []
-    for batch in dataloader(config, split='test'):
-        dens_img = einops.rearrange(
-            batch['density'], 'batch (h w c) -> batch h w c', h=height, w=width, c=channels
-        )
-        logits = jax.vmap(model, in_axes=(0, None, None))(dens_img, False, key)
-        predictions = jnp.argmax(logits, axis=-1)
-        accuracy = jnp.mean(predictions == batch['n_elements_label'])
-        accuracies.append(accuracy)
+    kwargs = dict(training=False)
+    batch = load_file(config, 0)
+    mod = config.vit.build()
+    out, params = mod.init_with_output(jax.random.key(0), im=batch, **kwargs)
+    debug_structure(batch=batch, module=mod, out=out)
+    flax_summary(mod, batch, **kwargs)
 
-    print(f'Accuracy: {np.sum(accuracies) / len(accuracies) * 100}%')
+    if config.do_profile:
+        jax.profiler.stop_trace()

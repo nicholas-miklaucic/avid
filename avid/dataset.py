@@ -1,29 +1,24 @@
 """Code to load the processed data."""
 
-import os
-
-os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
-
+from functools import partial
 from typing import Literal
+from warnings import filterwarnings
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pyrallis
+from beartype.roar import BeartypeDecorHintPep585DeprecationWarning
 from einops import rearrange
 
+from avid.augmentations import randomly_augment
 from avid.config import MainConfig
 from avid.databatch import DataBatch
 from avid.metadata import Metadata
 from avid.utils import ELEM_VALS, debug_structure
 
 n_elems = len(ELEM_VALS)
-
-from warnings import filterwarnings
-
-from beartype.roar import BeartypeDecorHintPep585DeprecationWarning
-
 filterwarnings('ignore', category=BeartypeDecorHintPep585DeprecationWarning)
 
 
@@ -75,6 +70,9 @@ def load_file(config: MainConfig, file_num=0):
     )
     data['e_form'] = metadata.e_form[file_num]
     data['lat_abc_angles'] = metadata.lat_abc_angles[file_num]
+
+    for k in ['density', 'e_form', 'lat_abc_angles']:
+        data[k] = data[k].astype(jnp.bfloat16)
     return DataBatch(**data)
 
 
@@ -103,12 +101,7 @@ def dataloader_base(
 
     split_files = np.array([None for _ in range(len(files))])
 
-    batch_inds = np.split(
-        np.random.permutation(split_idx),
-        len(split_idx) // config.train_batch_multiple,
-    )
-
-    # debug_structure(splidx=split_idx, bi0=batch_inds[0], bi=batch_inds)
+    shuffle_rng = np.random.default_rng(config.data.shuffle_seed)
 
     device = config.device.jax_device
 
@@ -116,6 +109,27 @@ def dataloader_base(
         # rearrange to fit shape of databatch
         device = device.reshape(-1, 1, 1, 1, 1)
 
+    batch_inds = np.split(
+        shuffle_rng.permutation(split_idx),
+        len(split_idx) // config.train_batch_multiple,
+    )
+
+    if config.data.do_augment:
+        aug_rng = np.random.default_rng(config.data.augment_seed)
+        transform = partial(
+            randomly_augment,
+            so3=config.data.so3,
+            o3=config.data.o3,
+            t3=config.data.t3,
+            n_grid=config.voxelizer.n_grid,
+            rng=aug_rng,
+        )
+    else:
+        transform = lambda x: x
+
+    # first batch doesn't augment: that's the base on which future augmentations happen. It may make
+    # sense in the future to have limited, imperfect augmentations, and we don't want those to be
+    # stacked on top of themselves.
     with jax.default_device(jax.devices('cpu')[0]):
         for batch in batch_inds:
             split_files[batch] = [load_file(config, i) for i in batch]
@@ -126,11 +140,11 @@ def dataloader_base(
 
     while infinite:
         batch_inds = np.split(
-            np.random.permutation(split_idx),
+            shuffle_rng.permutation(split_idx),
             len(split_idx) // config.train_batch_multiple,
         )
         for batch in batch_inds:
-            batch_data = [split_files[i] for i in batch]
+            batch_data = [transform(split_files[i]) for i in batch]
             collated = jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
             yield collated.device_put(device)
 

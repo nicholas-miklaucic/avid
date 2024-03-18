@@ -8,6 +8,7 @@ from pathlib import Path
 from shutil import copytree
 from typing import Mapping, Sequence
 
+import chex
 import jax
 import jax.numpy as jnp
 import optax
@@ -19,7 +20,7 @@ from flax import struct
 from flax.training import train_state
 
 from avid.checkpointing import best_ckpt
-from avid.config import MainConfig, TrainingConfig
+from avid.config import LossConfig, MainConfig
 from avid.dataset import DataBatch, dataloader
 
 
@@ -44,8 +45,9 @@ def create_train_state(module, optimizer, rng):
     )
 
 
-@ft.partial(jax.jit, static_argnames=['config'])
-def train_step(config: TrainingConfig, state: TrainState, batch: DataBatch, rng):
+@ft.partial(jax.jit)
+@chex.assert_max_traces(3)
+def train_step(config: LossConfig, state: TrainState, batch: DataBatch, rng):
     """Train for a single step."""
     dropout_train_key = jax.random.fold_in(key=rng, data=state.step)
 
@@ -63,8 +65,9 @@ def train_step(config: TrainingConfig, state: TrainState, batch: DataBatch, rng)
     return state
 
 
-@ft.partial(jax.jit, static_argnames=['config'])
-def compute_metrics(*, config: TrainingConfig, state: TrainState, batch: DataBatch):
+@ft.partial(jax.jit)
+@chex.assert_max_traces(3)
+def compute_metrics(*, config: LossConfig, state: TrainState, batch: DataBatch):
     preds = state.apply_fn(state.params, batch, training=False).squeeze()
 
     loss = config.regression_loss(preds, batch.e_form)
@@ -137,10 +140,10 @@ class TrainingRun:
             return None
 
         self.state = train_step(
-            self.config.train, self.state, batch, self.rng
+            config=self.config.train.loss, state=self.state, batch=batch, rng=self.rng
         )  # get updated train state (which contains the updated parameters)
         self.state = compute_metrics(
-            config=self.config.train, state=self.state, batch=batch
+            config=self.config.train.loss, state=self.state, batch=batch
         )  # aggregate batch metrics
 
         if self.should_log or self.should_ckpt:  # one training epoch has passed
@@ -166,13 +169,16 @@ class TrainingRun:
             self.metrics_history['step'].append(self.curr_step)
             self.metrics_history['epoch'].append(self.curr_step / self.steps_in_epoch)
             self.metrics_history['rel_mins'].append((time.monotonic() - self.start_time) / 60)
+            self.metrics_history['throughput'].append(
+                self.curr_step * self.config.batch_size / self.metrics_history['rel_mins'][-1]
+            )
 
         if self.should_ckpt:
             # Compute metrics on the test set after each training epoch
             self.test_state = self.state
             for _i, test_batch in zip(range(self.steps_in_test_epoch), self.test_dl):
                 self.test_state = compute_metrics(
-                    config=self.config.train, state=self.test_state, batch=test_batch
+                    config=self.config.train.loss, state=self.test_state, batch=test_batch
                 )
 
             for metric, value in self.test_state.metrics.compute().items():

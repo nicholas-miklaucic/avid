@@ -6,6 +6,7 @@ from jax.lib import xla_client
 
 from avid.config import MainConfig
 from avid.dataset import load_file
+from avid.training_state import DiffusionDataParallelTrainer
 from avid.utils import debug_structure, flax_summary
 
 
@@ -15,19 +16,32 @@ def to_dot_graph(x):
 
 
 @pyrallis.argparsing.wrap()
-def show_model(config: MainConfig):
+def show_model(config: MainConfig, kind='diffusion', make_hlo_dot=False):
     kwargs = dict(training=False)
     batch = load_file(config, 0)
-    mod = config.vit.build()
 
-    debug_structure(mod)
-    out, params = mod.init_with_output(jax.random.key(0), im=batch, **kwargs)
-    debug_structure(batch=batch, module=mod, out=out)
-    flax_summary(mod, batch, **kwargs)
+    if kind == 'reg':
+        mod = config.build_regressor()
+        enc_batch = {'im': batch}
+    elif kind == 'diffusion':
+        trainer = DiffusionDataParallelTrainer(config, weights_filename='test')
+        mod = trainer.model
+        enc_batch = {
+            'images': trainer.encoder.apply(trainer.encoder_params, data=batch, training=False),
+        }
+        del kwargs['training']
+
+    kwargs.update(enc_batch)
+    out, params = mod.init_with_output(jax.random.key(0), **kwargs)
+    debug_structure(module=mod, out=out)
+    flax_summary(mod, **kwargs)
 
     def loss(params):
         preds = mod.apply(params, batch, training=False)
-        return config.train.loss.regression_loss(preds, batch.e_form)
+        return config.train.loss.regression_loss(preds, batch.e_form.reshape(-1, 1))
+
+    if not make_hlo_dot:
+        return
 
     grad_loss = jax.xla_computation(jax.value_and_grad(loss))(params)
     with open('model.hlo', 'w') as f:
@@ -48,4 +62,5 @@ def show_model(config: MainConfig):
 
 
 if __name__ == '__main__':
-    show_model()
+    # with jax.log_compiles():
+    show_model(kind='reg')

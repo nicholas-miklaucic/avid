@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import jax
+import jax.numpy as jnp
 import optax
 import pyrallis
 from flax import linen as nn
@@ -11,13 +12,15 @@ from flax.struct import dataclass
 from pyrallis import field
 
 from avid import layers
+from avid.diffusion import DiffusionModel, UNet
 from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
-from avid.layers import Identity, LazyInMLP
+from avid.layers import Identity, LazyInMLP, MLPMixer
 from avid.utils import ELEM_VALS
 from avid.vit import (
     AddPositionEmbs,
     Encoder,
     ImageEmbed,
+    MLPMixerRegressor,
     SingleImageEmbed,
     ViTRegressor,
 )
@@ -229,8 +232,6 @@ class ViTInputConfig:
     patch_size: int = 4
     # Patch inner dimension.
     patch_latent_dim: int = 384
-    # Position embedding dimension. Learned positional embeddings don't use this.
-    pos_embed_dim: int = 32
     # Position embedding initialization. 'legendre' uses custom Legendre basis, concatenating with
     # the patch embedding. 'learned' uses standard learned embeddings that are added with the patch
     # embedding.
@@ -243,7 +244,6 @@ class ViTInputConfig:
                 SingleImageEmbed(
                     patch_size=self.patch_size,
                     patch_latent_dim=self.patch_latent_dim,
-                    pos_latent_dim=self.pos_embed_dim,
                     pos_embed=pos_embed,
                 ),
                 name='image_embed',
@@ -263,11 +263,7 @@ class ViTEncoderConfig:
     num_heads: int = 4
 
     # Dropout rate applied to inputs for attention.
-    enc_dropout_rate: float = 0.2
-
-    # Encoder attention dropout rate.
-    enc_attention_dropout_rate: float = 0.2
-
+    enc_dropout_rate: float = 0.2104
     # MLP config after attention layer. The out dim doesn't matter: it's constrained to the input.
     mlp: MLPConfig = field(default_factory=MLPConfig)
 
@@ -291,6 +287,8 @@ class SpeciesEmbedConfig:
     species_embed_dim: int = 32
     # MLP that embeds species embed + density to a new embedding.
     spec_embed: MLPConfig = field(default_factory=lambda: MLPConfig(out_dim=64))
+    # Whether to use the above MLP config or a simple weighted average.
+    use_simple_weighting: bool = False
 
     def build(self) -> ReduceSpeciesEmbed:
         return ReduceSpeciesEmbed(
@@ -298,6 +296,7 @@ class SpeciesEmbedConfig:
                 len(ELEM_VALS),
                 self.species_embed_dim,
                 self.spec_embed.build(),
+                self.use_simple_weighting,
             ),
             name='species_embed',
         )
@@ -361,15 +360,112 @@ class ViTRegressorConfig:
 
 
 @dataclass
+class MLPMixerConfig:
+    """Composite config for MLP Mixer regressor, including all parts."""
+
+    # Patch size: p, where image is broken up into p x p x p cubes.
+    patch_size: int = 3
+    # Patch inner dimension.
+    patch_latent_dim: int = 512
+    token_mixer: MLPConfig = field(default_factory=lambda: MLPConfig(activation=Layer('gelu')))
+    channel_mixer: MLPConfig = field(default_factory=lambda: MLPConfig(activation=Layer('gelu')))
+    num_blocks: int = 4
+    head: MLPConfig = field(default_factory=MLPConfig)
+    species_embed: SpeciesEmbedConfig = field(default_factory=SpeciesEmbedConfig)
+    downsample: DownsampleConfig = field(default_factory=DownsampleConfig)
+    out_dim: int = 1
+
+    def build(self) -> MLPMixerRegressor:
+        head = self.head.build()
+        head.out_dim = self.out_dim
+        return MLPMixerRegressor(
+            spec_embed=self.species_embed.build(),
+            downsample=self.downsample.build(),
+            head=head,
+            mixer=MLPMixer(
+                out_dim=self.out_dim,
+                num_blocks=self.num_blocks,
+                tokens_mlp=self.token_mixer.build(),
+                channels_mlp=self.channel_mixer.build(),
+            ),
+            im_embed=ImageEmbed(
+                SingleImageEmbed(self.patch_size, self.patch_latent_dim, Identity())
+            ),
+        )
+
+
+@dataclass
+class UNetConfig:
+    """UNet configuration."""
+
+    # Output channels for each block.
+    widths: list[int] = field(default_factory=lambda: [8, 16])
+
+    # Number of residual blocks per layer.
+    block_depth: int = 1
+
+    # Positional encoding dimension.
+    embed_dim: int = 8
+
+    # The minimum sinusoidal frequency.
+    embed_min_freq: float = 1.0
+
+    # The maximum frequency.
+    embed_max_freq: float = 1000.0
+
+    def build(self) -> UNet:
+        return UNet(
+            widths=self.widths,
+            block_depth=self.block_depth,
+            embed_dims=self.embed_dim,
+            embed_max_freq=self.embed_max_freq,
+            embed_min_freq=self.embed_min_freq,
+        )
+
+
+@dataclass
+class DiffusionConfig:
+    """Diffusion model configuration."""
+
+    # Minimum signal.
+    min_signal_rate: float = 0.02
+    # Maximum signal.
+    max_signal_rate: float = 0.95
+
+
+@dataclass
+class DiffusionUNetConfig:
+    """Config for diffusion using UNet."""
+
+    unet: UNetConfig = field(default_factory=UNetConfig)
+    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
+
+    def build(self) -> DiffusionModel:
+        return DiffusionModel(
+            min_signal_rate=self.diffusion.min_signal_rate,
+            max_signal_rate=self.diffusion.max_signal_rate,
+            model=self.unet.build(),
+        )
+
+
+@dataclass
 class LossConfig:
     """Config defining the loss function."""
 
     # delta for smooth_l1_loss. delta = 0 is L1 loss, and high delta behaves like L2 loss.
     loss_delta: float = 0.1
 
+    # Whether to use RMSE loss instead.
+    use_rmse: bool = False
+
     def regression_loss(self, preds, targets):
-        loss = optax.losses.huber_loss(preds, targets, delta=self.loss_delta) / self.loss_delta
-        return loss.mean()
+        return jax.lax.cond(
+            self.use_rmse,
+            lambda: jnp.sqrt(optax.losses.squared_error(preds, targets).mean()),
+            lambda: (
+                optax.losses.huber_loss(preds, targets, delta=self.loss_delta) / self.loss_delta
+            ).mean(),
+        )
 
 
 @dataclass
@@ -457,6 +553,10 @@ class MainConfig:
     log: LogConfig = field(default_factory=LogConfig)
     train: TrainingConfig = field(default_factory=TrainingConfig)
     vit: ViTRegressorConfig = field(default_factory=ViTRegressorConfig)
+    diffusion: DiffusionUNetConfig = field(default_factory=DiffusionUNetConfig)
+    mlp: MLPMixerConfig = field(default_factory=MLPMixerConfig)
+
+    regressor: str = 'vit'
 
     def __post_init__(self):
         if self.batch_size % self.data.data_batch_size != 0:
@@ -481,6 +581,18 @@ class MainConfig:
 
     def build_vit(self) -> ViTRegressor:
         return self.vit.build()
+
+    def build_diffusion(self) -> DiffusionModel:
+        return self.diffusion.build()
+
+    def build_mlp(self) -> MLPMixerRegressor:
+        return self.mlp.build()
+
+    def build_regressor(self):
+        if self.regressor == 'vit':
+            return self.build_vit()
+        elif self.regressor == 'mlp':
+            return self.build_mlp()
 
 
 if __name__ == '__main__':

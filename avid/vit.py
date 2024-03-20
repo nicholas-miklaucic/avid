@@ -13,7 +13,7 @@ from jaxtyping import Array, Float
 from avid.coord_embeddings import legendre_grid_embeds
 from avid.databatch import DataBatch
 from avid.encoder import ReduceSpeciesEmbed
-from avid.layers import LazyInMLP
+from avid.layers import LazyInMLP, MLPMixer
 from avid.utils import debug_structure, flax_summary, tcheck
 
 
@@ -87,7 +87,6 @@ class SingleImageEmbed(nn.Module):
 
     patch_size: int
     patch_latent_dim: int
-    pos_latent_dim: int
     pos_embed: nn.Module
 
     @tcheck
@@ -246,6 +245,26 @@ class ViTRegressor(nn.Module):
         out = self.downsample(out)
         out = self.im_embed(out)
         out = self.encoder(out, abys, training=training)
+
+        out = reduce(out, 'batch seq dim -> batch dim', 'mean')
+        # debug_structure(out=out)
+        out = jax.vmap(lambda x: self.head(x, training=training))(out)
+        return out
+
+
+class MLPMixerRegressor(nn.Module):
+    spec_embed: ReduceSpeciesEmbed
+    downsample: nn.Module
+    im_embed: ImageEmbed
+    mixer: MLPMixer
+    head: LazyInMLP
+
+    @nn.compact
+    def __call__(self, im: DataBatch, training: bool):
+        out = self.spec_embed(im, training=training)
+        out = self.downsample(out)
+        out = self.im_embed(out)
+        out = self.mixer(out, training=training)
 
         out = reduce(out, 'batch seq dim -> batch dim', 'mean')
         # debug_structure(out=out)

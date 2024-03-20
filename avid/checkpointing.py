@@ -10,12 +10,15 @@ from avid.config import MainConfig
 from avid.utils import debug_structure
 
 
-def best_ckpt(run_dir: PathLike):
+def run_config(run_dir: PathLike):
     with open(Path(run_dir) / 'config.toml') as conf_file:
         config = pyrallis.cfgparsing.load(MainConfig, conf_file)
+    return config
 
+
+def best_ckpt(run_dir: PathLike):
     mngr = ocp.CheckpointManager(
-        run_dir.absolute() / 'final_ckpt' / 'ckpts',
+        Path(run_dir).absolute() / 'final_ckpt' / 'ckpts',
         ocp.StandardCheckpointer(),
         options=ocp.CheckpointManagerOptions(
             enable_async_checkpointing=False,

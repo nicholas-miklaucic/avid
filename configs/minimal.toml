@@ -1,6 +1,3 @@
-[vit.head]
-out_dim = 1
-
 [vit.head.activation]
 name = "relu"
 
@@ -8,6 +5,27 @@ name = "relu"
 name = "Identity"
 
 [vit.species_embed.spec_embed]
+out_dim = 64
+
+[mlp.token_mixer.activation]
+name = "gelu"
+
+[mlp.token_mixer.final_activation]
+name = "Identity"
+
+[mlp.channel_mixer.activation]
+name = "gelu"
+
+[mlp.channel_mixer.final_activation]
+name = "Identity"
+
+[mlp.head.activation]
+name = "relu"
+
+[mlp.head.final_activation]
+name = "Identity"
+
+[mlp.species_embed.spec_embed]
 out_dim = 64
 
 [vit.encoder.mlp.activation]
@@ -20,4 +38,10 @@ name = "Identity"
 name = "relu"
 
 [vit.species_embed.spec_embed.final_activation]
+name = "Identity"
+
+[mlp.species_embed.spec_embed.activation]
+name = "relu"
+
+[mlp.species_embed.spec_embed.final_activation]
 name = "Identity"

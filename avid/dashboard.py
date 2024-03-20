@@ -71,7 +71,7 @@ class Losses(PlotextPlot):
 
             # cut off everything before a certain value on the x-axis
             # when computing y-axis
-            cutoff = max(0, np.log2(x_end) - 2)
+            cutoff = max(0, np.sqrt(x_end) - 2)
 
             for name, color in zip(self._data, cycle(self._colors)):
                 if name == 'epoch':
@@ -82,7 +82,7 @@ class Losses(PlotextPlot):
                 )
                 self.plt.plot(xx, yvals, color=color, label=name)
 
-            self.plt.ylim(0, max_data * 1.01)
+            self.plt.ylim(0, max_data * 1.1)
 
         self.refresh()
 

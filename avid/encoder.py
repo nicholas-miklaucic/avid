@@ -19,6 +19,7 @@ class SpeciesEmbed(nn.Module):
     n_species: int
     species_embed_dim: int
     embed_module: LazyInMLP
+    use_simple_weighting: bool = False
 
     @tcheck
     @nn.compact
@@ -33,8 +34,11 @@ class SpeciesEmbed(nn.Module):
             self.n_species, self.species_embed_dim, name='species_embed', dtype=x.dtype
         )
 
-        input_embeds = jnp.concat([spec_embed(spec), x[..., None]], axis=-1)
-        return self.embed_module(input_embeds, training) * mask.astype(x.dtype)
+        if self.use_simple_weighting:
+            return spec_embed(spec) * x
+        else:
+            input_embeds = jnp.concat([spec_embed(spec), x[..., None]], axis=-1)
+            return self.embed_module(input_embeds, training) * mask.astype(x.dtype)
 
 
 class ReduceSpeciesEmbed(nn.Module):

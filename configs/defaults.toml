@@ -1,6 +1,7 @@
 batch_size = 52
 do_profile = false
 num_epochs = 100
+regressor = "vit"
 
 [voxelizer]
 max_unique_species = 5
@@ -46,8 +47,18 @@ beta_2 = 0.999
 nestorov = true
 max_grad_norm = 1.0
 
+[vit]
+out_dim = 1
+
+[mlp]
+patch_size = 3
+patch_latent_dim = 512
+num_blocks = 4
+out_dim = 1
+
 [train.loss]
 loss_delta = 0.1
+use_rmse = false
 
 [vit.vit_input]
 patch_size = 4
@@ -63,13 +74,45 @@ enc_attention_dropout_rate = 0.2
 
 [vit.head]
 inner_dims = []
-out_dim = 1
 dropout = 0.1
 
 [vit.species_embed]
 species_embed_dim = 32
+use_simple_weighting = false
 
 [vit.downsample]
+factor = [ 2,]
+channels_out = [ 256,]
+kernel_size = [ 3,]
+
+[diffusion.unet]
+widths = [ 8, 16,]
+block_depth = 1
+embed_dim = 8
+embed_min_freq = 1.0
+embed_max_freq = 1000.0
+
+[diffusion.diffusion]
+min_signal_rate = 0.02
+max_signal_rate = 0.95
+
+[mlp.token_mixer]
+inner_dims = []
+dropout = 0.1
+
+[mlp.channel_mixer]
+inner_dims = []
+dropout = 0.1
+
+[mlp.head]
+inner_dims = []
+dropout = 0.1
+
+[mlp.species_embed]
+species_embed_dim = 32
+use_simple_weighting = false
+
+[mlp.downsample]
 factor = [ 2,]
 channels_out = [ 256,]
 kernel_size = [ 3,]
@@ -89,6 +132,29 @@ inner_dims = []
 out_dim = 64
 dropout = 0.1
 
+[mlp.token_mixer.activation]
+name = "gelu"
+
+[mlp.token_mixer.final_activation]
+name = "Identity"
+
+[mlp.channel_mixer.activation]
+name = "gelu"
+
+[mlp.channel_mixer.final_activation]
+name = "Identity"
+
+[mlp.head.activation]
+name = "relu"
+
+[mlp.head.final_activation]
+name = "Identity"
+
+[mlp.species_embed.spec_embed]
+inner_dims = []
+out_dim = 64
+dropout = 0.1
+
 [vit.encoder.mlp.activation]
 name = "relu"
 
@@ -99,4 +165,10 @@ name = "Identity"
 name = "relu"
 
 [vit.species_embed.spec_embed.final_activation]
+name = "Identity"
+
+[mlp.species_embed.spec_embed.activation]
+name = "relu"
+
+[mlp.species_embed.spec_embed.final_activation]
 name = "Identity"

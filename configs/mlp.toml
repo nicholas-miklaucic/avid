@@ -1,0 +1,57 @@
+batch_size = 208
+do_profile = false
+num_epochs = 100
+regressor = 'mlp'
+
+[data]
+data_batch_size = 52
+raw_data_folder = "data"
+data_folder = "precomputed"
+train_split = 9
+test_split = 2
+valid_split = 2
+do_augment = false
+
+[train]
+max_grad_norm = 2.0
+weight_decay = 0.2
+start_lr_frac = 0.5
+
+[train.loss]
+loss_delta = 0.2
+use_rmse = false
+
+[log]
+exp_name = 'e_form_mlp2'
+
+[mlp]
+patch_size = 3
+patch_latent_dim = 128
+num_blocks = 4
+out_dim = 1
+
+[mlp.token_mixer]
+inner_dims = [256]
+dropout = 0.2
+
+[mlp.token_mixer.activation]
+name = 'gelu'
+
+[mlp.channel_mixer]
+inner_dims = [384]
+dropout = 0.2
+
+[mlp.channel_mixer.activation]
+name = 'gelu'
+
+[mlp.downsample]
+factor = []
+channels_out = []
+kernel_size = []
+
+[mlp.species_embed]
+species_embed_dim = 64
+use_simple_weighting = true
+
+[mlp.head.activation]
+name = 'gelu'

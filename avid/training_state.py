@@ -6,9 +6,10 @@ from datetime import datetime, timedelta
 from os import PathLike
 from pathlib import Path
 from shutil import copytree
-from typing import Mapping, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
 import chex
+import flax
 import jax
 import jax.numpy as jnp
 import optax
@@ -19,9 +20,9 @@ from clu import metrics
 from flax import struct
 from flax.training import train_state
 
-from avid.checkpointing import best_ckpt
+from avid.checkpointing import best_ckpt, run_config
 from avid.config import LossConfig, MainConfig
-from avid.dataset import DataBatch, dataloader
+from avid.dataset import DataBatch, dataloader, load_file
 
 
 @struct.dataclass
@@ -72,7 +73,7 @@ def compute_metrics(*, config: LossConfig, state: TrainState, batch: DataBatch):
 
     loss = config.regression_loss(preds, batch.e_form)
     mae = jnp.abs(preds - batch.e_form).mean()
-    rmse = jnp.sqrt(optax.losses.l2_loss(preds, batch.e_form).mean())
+    rmse = jnp.sqrt(optax.losses.squared_error(preds, batch.e_form).mean())
     metric_updates = state.metrics.single_from_model_output(
         mae=mae, loss=loss, rmse=rmse, grad_norm=state.last_grad_norm
     )
@@ -109,7 +110,7 @@ class TrainingRun:
             num_epochs=self.num_epochs, steps_in_epoch=self.steps_in_epoch
         )
         self.optimizer = self.config.train.optimizer(self.scheduler)
-        self.state = create_train_state(self.config.build_vit(), self.optimizer, self.rng)
+        self.state = create_train_state(self.config.build_regressor(), self.optimizer, self.rng)
 
         if config.restart_from is not None:
             self.state = self.state.replace(
@@ -248,3 +249,159 @@ class TrainingRun:
         self.save_final(folder / 'final_ckpt')
 
         return folder
+
+
+class DiffusionDataParallelTrainer:
+    """
+    Trainer class using data parallelism with JAX.
+    This trainer leverages JAX's `pmap` for parallel training across multiple devices (GPUs/TPUs).
+    It handles the model training loop, including gradient computation, parameter updates, and evaluation.
+
+    Attributes:
+        model (Any): The model to be trained.
+        input_shape (Tuple[int, ...]): The shape of the image input tensor.
+        weights_filename (str): Filename where the trained model weights will be saved.
+        learning_rate (float): Learning rate for the optimizer.
+        params_path (Optional[str]): Path to pre-trained model parameters for initializing the model, if available.
+
+    Methods:
+        create_train_state(learning_rate, text_input_shape, image_input_shape): Initializes the training state, including parameters and optimizer.
+        train_step(state, texts, images): Performs a single training step, including forward pass, loss computation, and gradients update.
+        train(train_loader, num_epochs, val_loader): Runs the training loop over the specified number of epochs, using the provided data loaders for training and validation.
+        evaluation_step(state, texts, images): Performs an evaluation step, computing forward pass and loss without updating model parameters.
+        evaluate(test_loader): Evaluates the model performance on a test dataset.
+        save_params(): Saves the model parameters to a file.
+        load_params(filename): Loads model parameters from a file.
+    """
+
+    def __init__(
+        self,
+        config: MainConfig,
+        weights_filename: str,
+        encoder_path: PathLike = 'logs/e_form_no_downsample_253',
+        params_path: Optional[str] = None,
+    ) -> None:
+        self.config = config
+        self.encoder = run_config(encoder_path).vit.species_embed.build()
+        ckpt = best_ckpt(encoder_path)
+        params = ckpt['state']['params']['params']
+        spec_emb = params['spec_embed']  # ['species_embed']['species_embed']['embedding']
+        self.encoder_params = {'params': spec_emb}
+        self.model = self.config.build_diffusion()
+        self.params = None
+        self.params_path = params_path
+        self.num_parameters = None
+        self.best_val_loss = float('inf')
+        self.weights_filename = weights_filename
+        self.train_step = DiffusionDataParallelTrainer.train_step
+        self.evaluation_step = DiffusionDataParallelTrainer.evaluation_step
+
+        self.num_epochs = config.num_epochs
+        self.steps_in_epoch, self.dl = dataloader(config, split='train', infinite=True)
+        self.steps_in_test_epoch, self.test_dl = dataloader(config, split='valid', infinite=True)
+        self.num_steps = self.steps_in_epoch * self.num_epochs
+        self.steps = range(self.num_steps)
+        self.curr_step = 0
+        self.start_time = time.monotonic()
+        self.scheduler = self.config.train.lr_schedule(
+            num_epochs=self.num_epochs, steps_in_epoch=self.steps_in_epoch
+        )
+        self.optimizer = self.config.train.optimizer(self.scheduler)
+        self.state = self.create_train_state()
+
+    def encode(self, batch: DataBatch):
+        return self.encoder.apply(self.encoder_params, data=batch, training=False)
+
+    def create_train_state(self) -> Any:
+        rngs = {'params': jax.random.key(0), 'dropout': jax.random.key(1)}
+        batch = load_file(self.config, 0)
+        params = self.model.init(rngs, self.encode(batch))['params']
+
+        if self.params_path is not None:
+            params = self.load_params(self.params_path)
+
+        self.num_parameters = sum(param.size for param in jax.tree_util.tree_leaves(params))
+        print(f'Number of parameters: {self.num_parameters}')
+        state = train_state.TrainState.create(
+            apply_fn=self.model.apply, params=params, tx=self.optimizer
+        )
+        return state
+
+    @staticmethod
+    def train_step(state: Any, images: jnp.ndarray) -> Tuple[Any, jnp.ndarray]:
+        def loss_fn(params):
+            key = jax.random.PRNGKey(int(time.time()))
+            noises = jax.random.normal(key, shape=images.shape)
+            pred_noises, pred_images = state.apply_fn(
+                {'params': params}, images, rngs={'dropout': jax.random.PRNGKey(int(time.time()))}
+            )
+            return jnp.mean(jnp.square(pred_noises - noises)) + jnp.mean(
+                jnp.square(pred_images - images)
+            )
+
+        loss, grads = jax.value_and_grad(loss_fn)(state.params)
+        state = state.apply_gradients(grads=grads)
+        return state, loss
+
+    def train(self) -> None:
+        for epoch in range(self.num_epochs):
+            total_loss = 0.0
+            count = 0
+            for step, batch in zip(range(self.steps_in_epoch), self.dl):
+                encoded = self.encode(batch)
+                self.state, loss = self.train_step(state=self.state, images=encoded)
+                total_loss += jnp.mean(loss)
+                count += 1
+
+            mean_loss = total_loss / count
+            print(f'Epoch {epoch+1}, Train Loss: {mean_loss}')
+
+            val_loss = self.evaluate(self.steps_in_test_epoch, self.test_dl)
+            print(f'Epoch {epoch+1}, Val Loss: {val_loss}')
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+            print('New best validation score achieved, saving model...')
+            self.save_params()
+        return
+
+    @staticmethod
+    def evaluation_step(state: Any, images: jnp.ndarray) -> Tuple[Any, jnp.ndarray]:
+        key = jax.random.PRNGKey(int(time.time()))
+        noises = jax.random.normal(key, shape=images.shape)
+        pred_noises, pred_images = state.apply_fn(
+            {'params': state.params}, images, rngs={'dropout': jax.random.PRNGKey(int(time.time()))}
+        )
+        return jnp.mean(jnp.square(pred_noises - noises)) + jnp.mean(
+            jnp.square(pred_images - images)
+        )
+
+    def evaluate(
+        self, num_steps: int, test_loader: Iterable[Tuple[jnp.ndarray, jnp.ndarray]]
+    ) -> None:
+        total_loss = 0.0
+        count = 0
+        for step, batch in zip(range(num_steps), test_loader):
+            encoded = self.encode(batch)
+            loss = self.evaluation_step(self.state, encoded)
+            total_loss += jnp.mean(loss)
+            count += 1
+
+        mean_loss = total_loss / count
+        return mean_loss
+
+    def get_ema_weights(self, params, ema=0.999):
+        def func(x):
+            return x * ema + (1 - ema) * x
+
+        return jax.tree_util.tree_map(func, params)
+
+    def save_params(self) -> None:
+        self.params = flax.jax_utils.unreplicate(self.state.params)
+        self.params = self.get_ema_weights(self.params)
+        with open(self.weights_filename, 'wb') as f:
+            f.write(flax.serialization.to_bytes(self.params))
+
+    def load_params(self, filename: str):
+        with open(filename, 'rb') as f:
+            self.params = flax.serialization.from_bytes(self.params, f.read())
+        return self.params

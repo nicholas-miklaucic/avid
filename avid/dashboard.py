@@ -243,6 +243,7 @@ class Dashboard(App):
         self.title = 'Finished in {:.1f} minutes, saved to {}'.format(
             max(state.metrics_history['rel_mins']), folder
         )
+        self.progress.update(progress=state.num_epochs * state.steps_in_epoch)
 
 
 if __name__ == '__main__':

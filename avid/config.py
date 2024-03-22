@@ -14,13 +14,14 @@ from pyrallis import field
 from avid import layers
 from avid.diffusion import DiffusionModel, UNet
 from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
-from avid.layers import Identity, LazyInMLP, MLPMixer
+from avid.layers import EquivariantMixerMLP, Identity, LazyInMLP, MLPMixer
 from avid.utils import ELEM_VALS
 from avid.vit import (
     AddPositionEmbs,
     Encoder,
     ImageEmbed,
     MLPMixerRegressor,
+    O3ImageEmbed,
     SingleImageEmbed,
     ViTRegressor,
 )
@@ -202,15 +203,25 @@ class MLPConfig:
     # Dropout.
     dropout: float = 0.1
 
-    def build(self) -> LazyInMLP:
+    # Whether to make the layer equivariant.
+    equivariant: bool = False
+
+    def build(self) -> nn.Module:
         """Builds the head from the config."""
-        return LazyInMLP(
-            inner_dims=self.inner_dims,
-            out_dim=self.out_dim,
-            inner_act=self.activation.build(),
-            final_act=self.final_activation.build(),
-            dropout_rate=self.dropout,
-        )
+        if self.equivariant:
+            return EquivariantMixerMLP(
+                num_hidden_layers=len(self.inner_dims),
+                dropout_rate=self.dropout,
+                activation=self.activation.build(),
+            )
+        else:
+            return LazyInMLP(
+                inner_dims=self.inner_dims,
+                out_dim=self.out_dim,
+                inner_act=self.activation.build(),
+                final_act=self.final_activation.build(),
+                dropout_rate=self.dropout,
+            )
 
 
 @dataclass
@@ -365,9 +376,13 @@ class MLPMixerConfig:
 
     # Patch size: p, where image is broken up into p x p x p cubes.
     patch_size: int = 3
+    # Number of inner transformations to apply for each patch.
+    patch_heads: int = 8
     # Patch inner dimension.
     patch_latent_dim: int = 512
-    token_mixer: MLPConfig = field(default_factory=lambda: MLPConfig(activation=Layer('gelu')))
+    token_mixer: MLPConfig = field(
+        default=MLPConfig(activation=Layer('gelu'), equivariant=True), is_mutable=True
+    )
     channel_mixer: MLPConfig = field(default_factory=lambda: MLPConfig(activation=Layer('gelu')))
     num_blocks: int = 4
     head: MLPConfig = field(default_factory=MLPConfig)
@@ -389,7 +404,7 @@ class MLPMixerConfig:
                 channels_mlp=self.channel_mixer.build(),
             ),
             im_embed=ImageEmbed(
-                SingleImageEmbed(self.patch_size, self.patch_latent_dim, Identity())
+                O3ImageEmbed(self.patch_size, self.patch_latent_dim, self.patch_heads, Identity())
             ),
         )
 

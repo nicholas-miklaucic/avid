@@ -2,6 +2,7 @@
 
 from typing import Callable, Optional
 
+import einops
 import jax.numpy as jnp
 from flax import linen as nn
 from jaxtyping import Array, Float
@@ -53,6 +54,50 @@ class LazyInMLP(nn.Module):
         return x
 
 
+# 8^6 x subspace_dim
+Q = jnp.load('precomputed/equiv_basis_8.npy')
+ng6, subspace_dim = Q.shape
+ng = round(ng6 ** (1 / 6))
+assert ng**6 == ng6
+Q = Q.reshape(ng**3, ng**3, subspace_dim).astype(jnp.bfloat16)
+
+
+class EquivariantLinear(nn.Module):
+    kernel_init: Callable = nn.initializers.normal(stddev=1e-2, dtype=jnp.bfloat16)
+
+    @nn.compact
+    def __call__(self, x, out_head_mul: int):
+        out_dim = x.shape[-1]
+        assert out_dim**2 == ng6, f'{x.shape} is not valid!'
+
+        kernel = self.param('kernel', self.kernel_init, (subspace_dim, out_head_mul))
+        # QK is out_dim x out_dim
+        # is this the most efficient way to do this?
+        out = einops.einsum(
+            Q, kernel, x, 'd1 d2 sub, sub heads, batch chan d1 -> batch chan d1 heads'
+        )
+
+        out = einops.rearrange(out, 'batch chan d1 heads -> batch (chan heads) d1')
+        return out
+
+
+class EquivariantMixerMLP(nn.Module):
+    activation: Callable = nn.gelu
+    dropout_rate: float = 0.0
+    head_muls: tuple[int] = (2, 1)
+
+    @nn.compact
+    def __call__(self, x, training: bool = False):
+        for head_mul in self.inner_head_mul:
+            linear = EquivariantLinear()
+            x = linear(x, head_mul)
+            x = nn.Dropout(self.dropout_rate, deterministic=not training)(x)
+            x = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
+            x = self.activation(x)
+
+        return x
+
+
 class MixerBlock(nn.Module):
     """
     A Flax Module to act as the mixer block layer for the MLP-Mixer Architecture.
@@ -62,13 +107,13 @@ class MixerBlock(nn.Module):
         channels_mlp_dim: MLP Block 2
     """
 
-    tokens_mlp: LazyInMLP
+    tokens_mlp: nn.Module
     channels_mlp: LazyInMLP
 
     @nn.compact
-    def __call__(self, x, training: bool = False) -> Array:
+    def __call__(self, x, head_mul: int, training: bool = False) -> Array:
         # Layer Normalization
-        y = nn.LayerNorm(dtype=x.dtype)(x)
+        y = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
         # Transpose
         y = jnp.swapaxes(y, 1, 2)
         # MLP 1
@@ -78,7 +123,7 @@ class MixerBlock(nn.Module):
         # Skip Connection
         x = x + y
         # Layer Normalization
-        y = nn.LayerNorm(dtype=x.dtype)(x)
+        y = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
         # MLP 2 with Skip Connection
         out = x + self.channels_mlp(y, training)
         return out
@@ -101,18 +146,53 @@ class MLPMixer(nn.Module):
 
     out_dim: int
     num_blocks: int
-    tokens_mlp: LazyInMLP
+    tokens_mlp: nn.Module
     channels_mlp: LazyInMLP
 
     @nn.compact
     def __call__(self, inputs, *, training: bool = False) -> Array:
         x = inputs
         # Num Blocks x Mixer Blocks
-        for _ in range(self.num_blocks):
+        for head_mul in self.inner_head_muls:
             x = MixerBlock(
                 tokens_mlp=self.tokens_mlp.copy(),
                 channels_mlp=self.channels_mlp.copy(),
             )(x, training=training)
         # Output Head
-        x = nn.LayerNorm(dtype=x.dtype, name='pre_head_layer_norm')(x)
+        x = nn.LayerNorm(
+            dtype=x.dtype, name='pre_head_layer_norm', use_bias=False, use_scale=False
+        )(x)
         return x
+
+
+class PermInvariantEncoder(nn.Module):
+    """A la Deep Sets, constructs a permutation-invariant representation of the inputs based on aggregations.
+    Uses mean, std, and differentiable quantiles."""
+
+    @nn.compact
+    def __call__(self, x):
+        """x: batch chan token
+        Invariant over the order of tokens."""
+
+        x_mean = jnp.mean(x, axis=-1, keepdims=True)
+        x_std = jnp.std(x, axis=-1, keepdims=True)
+
+        x_whiten = (x - x_mean) / (x_std + 1e-8)
+
+        x_quants = []
+        # for power in jnp.linspace(1, 3, 6):
+        #     x_quants.append(
+        #         jnp.mean(
+        #             jnp.sign(x_whiten) * jnp.abs(x_whiten**power),
+        #             axis=-1,
+        #             keepdims=True,
+        #         )
+        #         ** (1 / power),
+        #     )
+
+        # This has serious numerical stability problems in the backward pass. Instead, I'll use something else.
+        # eps = 0.02
+        # quants = jnp.linspace(eps, 1 - eps, 14, dtype=jnp.bfloat16)
+        # from ott.tools.soft_sort import quantile
+        # x_quants = quantile(x, quants, axis=-1, weight=10 / x.shape[-1])
+        return jnp.concat([x_mean, x_std] + x_quants, axis=2)

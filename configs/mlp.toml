@@ -26,13 +26,13 @@ exp_name = 'e_form_equivariant_patch'
 
 [mlp]
 patch_size = 3
-patch_latent_dim = 384
+patch_latent_dim = 256
 num_blocks = 4
 out_dim = 1
 
 [mlp.token_mixer]
 equivariant = true
-inner_dims = [256]
+inner_dims = [1]
 dropout = 0.2
 
 [mlp.token_mixer.activation]
@@ -51,11 +51,11 @@ channels_out = []
 kernel_size = []
 
 [mlp.species_embed]
-species_embed_dim = 64
+species_embed_dim = 128
 use_simple_weighting = true
 
 [mlp.head]
-inner_dims = [1024, 1024, 512]
+inner_dims = [1024, 512]
 dropout = 0.2
 
 [mlp.head.activation]

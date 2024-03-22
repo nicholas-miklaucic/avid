@@ -88,7 +88,7 @@ class EquivariantMixerMLP(nn.Module):
 
     @nn.compact
     def __call__(self, x, training: bool = False):
-        for head_mul in self.inner_head_mul:
+        for head_mul in self.head_muls:
             linear = EquivariantLinear()
             x = linear(x, head_mul)
             x = nn.Dropout(self.dropout_rate, deterministic=not training)(x)
@@ -111,7 +111,7 @@ class MixerBlock(nn.Module):
     channels_mlp: LazyInMLP
 
     @nn.compact
-    def __call__(self, x, head_mul: int, training: bool = False) -> Array:
+    def __call__(self, x, training: bool = False) -> Array:
         # Layer Normalization
         y = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
         # Transpose
@@ -121,7 +121,10 @@ class MixerBlock(nn.Module):
         # Transpose
         y = jnp.swapaxes(y, 1, 2)
         # Skip Connection
-        x = x + y
+        # now it's possible that the channels have changed
+        # if so, broadcast x to fit
+        x = x[..., None] + y.reshape(*x.shape, -1)
+        x = einops.rearrange(x, 'batch dim chan chan_mul -> batch dim (chan chan_mul)')
         # Layer Normalization
         y = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
         # MLP 2 with Skip Connection
@@ -153,7 +156,7 @@ class MLPMixer(nn.Module):
     def __call__(self, inputs, *, training: bool = False) -> Array:
         x = inputs
         # Num Blocks x Mixer Blocks
-        for head_mul in self.inner_head_muls:
+        for _ in range(self.num_blocks):
             x = MixerBlock(
                 tokens_mlp=self.tokens_mlp.copy(),
                 channels_mlp=self.channels_mlp.copy(),
@@ -177,9 +180,9 @@ class PermInvariantEncoder(nn.Module):
         x_mean = jnp.mean(x, axis=-1, keepdims=True)
         x_std = jnp.std(x, axis=-1, keepdims=True)
 
-        x_whiten = (x - x_mean) / (x_std + 1e-8)
+        # x_whiten = (x - x_mean) / (x_std + 1e-8)
 
-        x_quants = []
+        # x_quants = []
         # for power in jnp.linspace(1, 3, 6):
         #     x_quants.append(
         #         jnp.mean(
@@ -195,4 +198,4 @@ class PermInvariantEncoder(nn.Module):
         # quants = jnp.linspace(eps, 1 - eps, 14, dtype=jnp.bfloat16)
         # from ott.tools.soft_sort import quantile
         # x_quants = quantile(x, quants, axis=-1, weight=10 / x.shape[-1])
-        return jnp.concat([x_mean, x_std] + x_quants, axis=2)
+        return jnp.concat([x_mean, x_std], axis=2)

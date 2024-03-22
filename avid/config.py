@@ -210,7 +210,7 @@ class MLPConfig:
         """Builds the head from the config."""
         if self.equivariant:
             return EquivariantMixerMLP(
-                num_hidden_layers=len(self.inner_dims),
+                head_muls=self.inner_dims,
                 dropout_rate=self.dropout,
                 activation=self.activation.build(),
             )

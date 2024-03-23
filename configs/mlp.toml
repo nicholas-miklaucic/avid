@@ -22,18 +22,18 @@ loss_delta = 0.1
 use_rmse = false
 
 [log]
-exp_name = 'e_form_equivariant_patch'
+exp_name = 'e_form_equivariant_conv'
 
 [mlp]
 patch_size = 3
 patch_latent_dim = 256
-num_blocks = 4
+num_blocks = 6
 out_dim = 1
 
 [mlp.token_mixer]
 equivariant = true
 inner_dims = [1]
-dropout = 0.2
+dropout = 0
 
 [mlp.token_mixer.activation]
 name = 'gelu'
@@ -55,7 +55,7 @@ species_embed_dim = 128
 use_simple_weighting = true
 
 [mlp.head]
-inner_dims = [1024, 512]
+inner_dims = [1024, 1024, 512]
 dropout = 0.2
 
 [mlp.head.activation]

@@ -60,6 +60,16 @@ ng6, subspace_dim = Q.shape
 ng = round(ng6 ** (1 / 6))
 assert ng**6 == ng6
 Q = Q.reshape(ng**3, ng**3, subspace_dim).astype(jnp.bfloat16)
+conv_kernel = Q[0, ...].reshape(ng, ng, ng, 1, 35)
+counts = jnp.sum(conv_kernel, axis=(0, 1, 2))
+
+conv = nn.Conv(
+    features=1,
+    kernel_size=(ng, ng, ng),
+    use_bias=False,
+    padding='CIRCULAR',
+    dtype=jnp.bfloat16,
+)
 
 
 class EquivariantLinear(nn.Module):
@@ -67,17 +77,20 @@ class EquivariantLinear(nn.Module):
 
     @nn.compact
     def __call__(self, x, out_head_mul: int):
-        out_dim = x.shape[-1]
+        out_dim = x.shape[-2]
         assert out_dim**2 == ng6, f'{x.shape} is not valid!'
 
-        kernel = self.param('kernel', self.kernel_init, (subspace_dim, out_head_mul))
+        x_im = einops.rearrange(
+            x, 'batch (n1 n2 n3) chan -> (batch chan) n1 n2 n3 1', n1=ng, n2=ng, n3=ng
+        )
+        kernel = self.param('kernel', self.kernel_init, (subspace_dim,))
         # QK is out_dim x out_dim
         # is this the most efficient way to do this?
-        out = einops.einsum(
-            Q, kernel, x, 'd1 d2 sub, sub heads, batch chan d1 -> batch chan d1 heads'
+        kernel_expanded = einops.einsum(conv_kernel, kernel, 'a b c d s, s -> a b c d')[..., None]
+        conv_out = conv.apply({'params': {'kernel': kernel_expanded}}, x_im)
+        out = einops.rearrange(
+            conv_out, '(batch chan) n1 n2 n3 1 -> batch (n1 n2 n3) chan', batch=x.shape[0]
         )
-
-        out = einops.rearrange(out, 'batch chan d1 heads -> batch (chan heads) d1')
         return out
 
 
@@ -114,12 +127,12 @@ class MixerBlock(nn.Module):
     def __call__(self, x, training: bool = False) -> Array:
         # Layer Normalization
         y = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
-        # Transpose
-        y = jnp.swapaxes(y, 1, 2)
+        # # Transpose
+        # y = jnp.swapaxes(y, 1, 2)
         # MLP 1
         y = self.tokens_mlp(y, training)
         # Transpose
-        y = jnp.swapaxes(y, 1, 2)
+        # y = jnp.swapaxes(y, 1, 2)
         # Skip Connection
         # now it's possible that the channels have changed
         # if so, broadcast x to fit

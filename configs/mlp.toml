@@ -26,8 +26,8 @@ exp_name = 'e_form_equivariant_conv'
 
 [mlp]
 patch_size = 3
-patch_latent_dim = 256
-num_blocks = 6
+patch_latent_dim = 128
+num_blocks = 4
 out_dim = 1
 
 [mlp.token_mixer]

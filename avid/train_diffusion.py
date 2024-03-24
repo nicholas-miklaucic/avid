@@ -11,7 +11,7 @@ from avid.training_state import DiffusionDataParallelTrainer
 @wrap()
 def train_diffusion(config: MainConfig):
     """Trains the diffusion U-Net."""
-    model = DiffusionDataParallelTrainer(config, Path('logs') / 'unet' / 'weights')
+    model = DiffusionDataParallelTrainer(config, Path('logs') / 'mlp' / 'weights')
     model.train()
 
 

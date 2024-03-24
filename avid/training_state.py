@@ -278,15 +278,19 @@ class DiffusionDataParallelTrainer:
         self,
         config: MainConfig,
         weights_filename: str,
-        encoder_path: PathLike = 'logs/e_form_no_downsample_253',
+        encoder_path: PathLike = 'logs/e_form_equivariant_patch_235',
         params_path: Optional[str] = None,
     ) -> None:
         self.config = config
-        self.encoder = run_config(encoder_path).vit.species_embed.build()
+        enc_config = run_config(encoder_path)
+        enc_mlp = enc_config.build_mlp()
+        self.spec_encoder = enc_mlp.spec_embed
+        self.patchifier = enc_mlp.im_embed
         ckpt = best_ckpt(encoder_path)
         params = ckpt['state']['params']['params']
-        spec_emb = params['spec_embed']  # ['species_embed']['species_embed']['embedding']
-        self.encoder_params = {'params': spec_emb}
+
+        self.spec_emb_params = {'params': params['spec_embed']}
+        self.patchifier_params = {'params': params['im_embed']}
         self.model = self.config.build_diffusion()
         self.params = None
         self.params_path = params_path
@@ -310,12 +314,13 @@ class DiffusionDataParallelTrainer:
         self.state = self.create_train_state()
 
     def encode(self, batch: DataBatch):
-        return self.encoder.apply(self.encoder_params, data=batch, training=False)
+        spec_emb = self.spec_encoder.apply(self.spec_emb_params, data=batch, training=False)
+        return self.patchifier.apply(self.patchifier_params, im=spec_emb)
 
     def create_train_state(self) -> Any:
         rngs = {'params': jax.random.key(0), 'dropout': jax.random.key(1)}
         batch = load_file(self.config, 0)
-        params = self.model.init(rngs, self.encode(batch))['params']
+        params = self.model.init(rngs, self.encode(batch), training=True)['params']
 
         if self.params_path is not None:
             params = self.load_params(self.params_path)
@@ -333,7 +338,10 @@ class DiffusionDataParallelTrainer:
             key = jax.random.PRNGKey(int(time.time()))
             noises = jax.random.normal(key, shape=images.shape)
             pred_noises, pred_images = state.apply_fn(
-                {'params': params}, images, rngs={'dropout': jax.random.PRNGKey(int(time.time()))}
+                {'params': params},
+                images,
+                rngs={'dropout': jax.random.PRNGKey(int(time.time()))},
+                training=True,
             )
             return jnp.mean(jnp.square(pred_noises - noises)) + jnp.mean(
                 jnp.square(pred_images - images)
@@ -369,7 +377,10 @@ class DiffusionDataParallelTrainer:
         key = jax.random.PRNGKey(int(time.time()))
         noises = jax.random.normal(key, shape=images.shape)
         pred_noises, pred_images = state.apply_fn(
-            {'params': state.params}, images, rngs={'dropout': jax.random.PRNGKey(int(time.time()))}
+            {'params': state.params},
+            images,
+            rngs={'dropout': jax.random.PRNGKey(int(time.time()))},
+            training=False,
         )
         return jnp.mean(jnp.square(pred_noises - noises)) + jnp.mean(
             jnp.square(pred_images - images)

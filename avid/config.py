@@ -12,16 +12,16 @@ from flax.struct import dataclass
 from pyrallis import field
 
 from avid import layers
-from avid.diffusion import DiffusionModel, UNet
+from avid.diffusion import DiffusionBackbone, DiffusionModel
 from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
 from avid.layers import EquivariantMixerMLP, Identity, LazyInMLP, MLPMixer
+from avid.mlp_mixer import MLPMixerDiffuser, MLPMixerRegressor, O3ImageEmbed
+from avid.unet import UNet
 from avid.utils import ELEM_VALS
 from avid.vit import (
     AddPositionEmbs,
     Encoder,
     ImageEmbed,
-    MLPMixerRegressor,
-    O3ImageEmbed,
     SingleImageEmbed,
     ViTRegressor,
 )
@@ -447,6 +447,13 @@ class DiffusionConfig:
     # Maximum signal.
     max_signal_rate: float = 0.95
 
+    def build(self, model: DiffusionBackbone) -> DiffusionModel:
+        return DiffusionModel(
+            min_signal_rate=self.min_signal_rate,
+            max_signal_rate=self.max_signal_rate,
+            model=model,
+        )
+
 
 @dataclass
 class DiffusionUNetConfig:
@@ -454,6 +461,8 @@ class DiffusionUNetConfig:
 
     unet: UNetConfig = field(default_factory=UNetConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
+
+    # TODO delete this entirely: diffusion and backbone parameters are separate
 
     def build(self) -> DiffusionModel:
         return DiffusionModel(
@@ -598,7 +607,13 @@ class MainConfig:
         return self.vit.build()
 
     def build_diffusion(self) -> DiffusionModel:
-        return self.diffusion.build()
+        diffuser = MLPMixerDiffuser(
+            embed_dims=self.diffusion.unet.embed_dim,
+            embed_max_freq=self.diffusion.unet.embed_max_freq,
+            embed_min_freq=self.diffusion.unet.embed_min_freq,
+            mixer=self.build_mlp().mixer,
+        )
+        return self.diffusion.diffusion.build(diffuser)
 
     def build_mlp(self) -> MLPMixerRegressor:
         return self.mlp.build()

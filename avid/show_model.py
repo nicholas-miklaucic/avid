@@ -27,9 +27,8 @@ def show_model(config: MainConfig, kind='diffusion', make_hlo_dot=False):
         trainer = DiffusionDataParallelTrainer(config, weights_filename='test')
         mod = trainer.model
         enc_batch = {
-            'images': trainer.encoder.apply(trainer.encoder_params, data=batch, training=False),
+            'images': trainer.encode(batch),
         }
-        del kwargs['training']
 
     kwargs.update(enc_batch)
     out, params = mod.init_with_output(jax.random.key(0), **kwargs)
@@ -63,4 +62,4 @@ def show_model(config: MainConfig, kind='diffusion', make_hlo_dot=False):
 
 if __name__ == '__main__':
     # with jax.log_compiles():
-    show_model(kind='reg')
+    show_model(kind='diffusion')

@@ -7,9 +7,9 @@ regressor = 'mlp'
 data_batch_size = 52
 raw_data_folder = "data"
 data_folder = "precomputed"
-train_split = 9
-test_split = 2
-valid_split = 2
+train_split = 4
+test_split = 8
+valid_split = 1
 do_augment = false
 
 [train]
@@ -22,12 +22,12 @@ loss_delta = 0.15
 use_rmse = false
 
 [log]
-exp_name = 'e_form_equivariant_conv'
+exp_name = 'diffusion_emlp'
 
 [mlp]
 patch_size = 3
 patch_latent_dim = 384
-num_blocks = 3
+num_blocks = 1
 out_dim = 1
 
 [mlp.token_mixer]
@@ -39,7 +39,7 @@ dropout = 0
 name = 'swish'
 
 [mlp.channel_mixer]
-inner_dims = [512]
+inner_dims = [256]
 dropout = 0.1
 
 [mlp.channel_mixer.activation]
@@ -53,10 +53,3 @@ kernel_size = []
 [mlp.species_embed]
 species_embed_dim = 64
 use_simple_weighting = true
-
-[mlp.head]
-inner_dims = [2048, 1024, 512]
-dropout = 0.2
-
-[mlp.head.activation]
-name = 'swish'

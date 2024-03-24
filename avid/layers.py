@@ -60,7 +60,7 @@ ng6, subspace_dim = Q.shape
 ng = round(ng6 ** (1 / 6))
 assert ng**6 == ng6
 Q = Q.reshape(ng**3, ng**3, subspace_dim).astype(jnp.bfloat16)
-conv_kernel = Q[0, ...].reshape(ng, ng, ng, 35)
+conv_kernel = Q[0, ...].reshape(ng, ng, ng, 1, 35)
 counts = jnp.sum(conv_kernel, axis=(0, 1, 2))
 
 
@@ -70,30 +70,31 @@ class EquivariantLinear(nn.Module):
     @nn.compact
     def __call__(self, x, out_head_mul: int):
         batch, out_dim, chan = x.shape
+
         assert out_dim**2 == ng6, f'{x.shape} is not valid!'
 
         conv = nn.Conv(
-            features=chan,
+            features=1,
             kernel_size=(ng, ng, ng),
             use_bias=False,
             padding='CIRCULAR',
             dtype=jnp.bfloat16,
         )
 
-        # x_im = einops.rearrange(
-        #     x, 'batch (n1 n2 n3) chan -> (batch chan) n1 n2 n3 1', n1=ng, n2=ng, n3=ng
-        # )
         x_im = einops.rearrange(
-            x, 'batch (n1 n2 n3) chan -> batch n1 n2 n3 chan', n1=ng, n2=ng, n3=ng
-        )
-        kernel = self.param('kernel', self.kernel_init, (subspace_dim, chan, chan))
+            x, 'batch (n1 n2 n3) chan -> (batch chan) n1 n2 n3', n1=ng, n2=ng, n3=ng
+        )[..., None]
+        # x_im = einops.rearrange(
+        #     x, 'batch (n1 n2 n3) chan -> batch n1 n2 n3 chan', n1=ng, n2=ng, n3=ng
+        # )
+        kernel = self.param('kernel', self.kernel_init, (subspace_dim, 1))
         # QK is out_dim x out_dim
         # is this the most efficient way to do this?
-        kernel_expanded = einops.einsum(
-            conv_kernel, kernel, 'a b c s, s ch chout -> a b c ch chout'
-        )
+        kernel_expanded = einops.einsum(conv_kernel, kernel, 'a b c d s, s ch -> a b c d ch')
         conv_out = conv.apply({'params': {'kernel': kernel_expanded}}, x_im)
-        out = einops.rearrange(conv_out, 'batch n1 n2 n3 chan -> batch (n1 n2 n3) chan')
+        out = einops.rearrange(
+            conv_out, '(batch chan) n1 n2 n3 1 -> batch (n1 n2 n3) chan', batch=batch
+        )
         return out
 
 

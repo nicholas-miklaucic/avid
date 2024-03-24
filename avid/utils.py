@@ -58,10 +58,10 @@ class StatVisitor(AbstractTreeVisitor):
     def jax_arr(self, arr: jax.Array):
         flat = arr.flatten().astype(jnp.float32)
         inds = 1 + 0.01 * jnp.cos(jnp.arange(len(flat), dtype=jnp.float32))
-        return f'{(flat * inds).mean().item():.3f}'
+        return f'{(flat * inds).mean().item():.4f}'
 
     def scalar(self, x: int | float):
-        return f'{x:.2f}' + x.__class__.__name__[0]
+        return f'{x:.4f}' + x.__class__.__name__[0]
 
     def np_arr(self, arr: np.ndarray):
         return self.jax_arr(jnp.array(arr))
@@ -75,7 +75,7 @@ class StructureVisitor(AbstractTreeVisitor):
         return f'{arr.dtype}{list(arr.shape)}'
 
     def scalar(self, x: int | float):
-        return f'{x.__class__.__name__}=' + str(x)[:3]
+        return f'{x.__class__.__name__}=' + str(x)
 
     def np_arr(self, arr: np.ndarray):
         return f'np{list(arr.shape)}'

@@ -1,6 +1,6 @@
 batch_size = 52
 do_profile = false
-num_epochs = 50
+num_epochs = 100
 regressor = 'mlp'
 
 [data]

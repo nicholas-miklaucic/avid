@@ -16,9 +16,7 @@ pip install toml pyrallis rho-plus equinox diffrax optax plotext rich einops pan
 
 TODO:
 
-- [ ] Move things into config files
-- [ ] Take a look at latent space, both species and encoder
-- [ ] Implement upsampler and diffusion transformer backend
-- [ ] Implement warmstart/encoder warmstart
 - [ ] Perhaps configure DiLED in addition to normal diffusion and encoder losses
-- [ ] EMA/SWA
+- [ ] How to train the encoder? As part of the normal process or separately?
+- [ ] EMA
+- [ ] Refactor diffusion trainer into TrainingRun so we can get dashboards again

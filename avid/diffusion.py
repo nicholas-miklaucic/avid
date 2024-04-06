@@ -112,7 +112,9 @@ class DiffusionModel(nn.Module):
         for step in range(diffusion_steps):
             diffusion_times = jnp.ones((num_images, 1, 1, 1, 1)) - step * step_size
             noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
-            pred_noises, pred_images = self.denoise(next_noisy_images, noise_rates, signal_rates)
+            pred_noises, pred_images = self.denoise(
+                next_noisy_images, noise_rates, signal_rates, training=False
+            )
             next_diffusion_times = diffusion_times - step_size
             next_noise_rates, next_signal_rates = self.diffusion_schedule(next_diffusion_times)
             next_noisy_images = next_signal_rates * pred_images + next_noise_rates * pred_noises

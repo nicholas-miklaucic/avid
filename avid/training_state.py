@@ -415,4 +415,5 @@ class DiffusionDataParallelTrainer:
     def load_params(self, filename: str):
         with open(filename, 'rb') as f:
             self.params = flax.serialization.from_bytes(self.params, f.read())
+
         return self.params

@@ -52,6 +52,7 @@ out_dim = 1
 
 [mlp]
 patch_size = 3
+patch_heads = 8
 patch_latent_dim = 512
 num_blocks = 4
 out_dim = 1
@@ -63,18 +64,17 @@ use_rmse = false
 [vit.vit_input]
 patch_size = 4
 patch_latent_dim = 384
-pos_embed_dim = 32
 pos_embed_type = "learned"
 
 [vit.encoder]
 num_layers = 2
 num_heads = 4
-enc_dropout_rate = 0.2
-enc_attention_dropout_rate = 0.2
+enc_dropout_rate = 0.2104
 
 [vit.head]
 inner_dims = []
 dropout = 0.1
+equivariant = false
 
 [vit.species_embed]
 species_embed_dim = 32
@@ -99,14 +99,17 @@ max_signal_rate = 0.95
 [mlp.token_mixer]
 inner_dims = []
 dropout = 0.1
+equivariant = true
 
 [mlp.channel_mixer]
 inner_dims = []
 dropout = 0.1
+equivariant = false
 
 [mlp.head]
 inner_dims = []
 dropout = 0.1
+equivariant = false
 
 [mlp.species_embed]
 species_embed_dim = 32
@@ -120,6 +123,7 @@ kernel_size = [ 3,]
 [vit.encoder.mlp]
 inner_dims = []
 dropout = 0.1
+equivariant = false
 
 [vit.head.activation]
 name = "relu"
@@ -131,6 +135,7 @@ name = "Identity"
 inner_dims = []
 out_dim = 64
 dropout = 0.1
+equivariant = false
 
 [mlp.token_mixer.activation]
 name = "gelu"
@@ -154,6 +159,7 @@ name = "Identity"
 inner_dims = []
 out_dim = 64
 dropout = 0.1
+equivariant = false
 
 [vit.encoder.mlp.activation]
 name = "relu"

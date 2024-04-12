@@ -6,14 +6,14 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 import pyrallis
-from einops import rearrange, reduce
+from einops import rearrange
 from flax import linen as nn
 from jaxtyping import Array, Float
 
 from avid.coord_embeddings import legendre_grid_embeds
 from avid.databatch import DataBatch
 from avid.encoder import ReduceSpeciesEmbed
-from avid.layers import LazyInMLP
+from avid.layers import EquivariantMHA, LazyInMLP, PermInvariantEncoder
 from avid.utils import debug_structure, flax_summary, tcheck
 
 
@@ -138,6 +138,7 @@ class Encoder1DBlock(nn.Module):
     mlp: LazyInMLP
     dropout_rate: float = 0.1
     attention_dropout_rate: float = 0.1
+    equivariant: bool = False
 
     @nn.compact
     def __call__(self, inputs, abys, *, training: bool):
@@ -154,14 +155,18 @@ class Encoder1DBlock(nn.Module):
         # zero out initializations: will just apply the identity function at first
         x = nn.LayerNorm(scale_init=nn.zeros, dtype=inputs.dtype)(inputs)
         x = x * y1 + b1
-        x = nn.MultiHeadDotProductAttention(
-            kernel_init=nn.initializers.xavier_uniform(),
-            broadcast_dropout=False,
-            deterministic=not training,
-            dropout_rate=self.attention_dropout_rate,
-            num_heads=self.num_heads,
-            dtype=jnp.bfloat16,
-        )(x, x)
+
+        if self.equivariant:
+            x = EquivariantMHA(num_heads=self.num_heads)(x)
+        else:
+            x = nn.MultiHeadDotProductAttention(
+                kernel_init=nn.initializers.xavier_uniform(),
+                broadcast_dropout=False,
+                deterministic=not training,
+                dropout_rate=self.attention_dropout_rate,
+                num_heads=self.num_heads,
+                dtype=jnp.bfloat16,
+            )(x, x)
         x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not training)
         x = x * a1
         x = x + inputs
@@ -200,6 +205,7 @@ class Encoder(nn.Module):
     mlp: LazyInMLP
     dropout_rate: float = 0.1
     attention_dropout_rate: float = 0.1
+    equivariant: bool = False
 
     @nn.compact
     def __call__(self, x, abys, *, training: bool):
@@ -223,6 +229,7 @@ class Encoder(nn.Module):
                 name=f'encoderblock_{lyr}',
                 num_heads=self.num_heads,
                 mlp=self.mlp,
+                equivariant=self.equivariant,
             )(x, abys, training=training)
         encoded = nn.LayerNorm(name='encoder_norm', dtype=x.dtype)(x)
 
@@ -238,15 +245,20 @@ class ViTRegressor(nn.Module):
     im_embed: ImageEmbed
     encoder: Encoder
     head: LazyInMLP
+    equivariant: bool = False
 
     @nn.compact
     def __call__(self, im: DataBatch, training: bool, abys=ABY_IDENTITY):
         out = self.spec_embed(im, training=training)
         out = self.downsample(out)
         out = self.im_embed(out)
-        out = self.encoder(out, abys, training=training)
 
-        out = reduce(out, 'batch seq dim -> batch dim', 'mean')
+        encoder = self.encoder.copy(equivariant=self.equivariant)
+        out = encoder(out, abys, training=training)
+
+        # batch seq dim -> batch dim*2
+        out = PermInvariantEncoder()(out, axis=1, keepdims=False)
+        out = nn.LayerNorm()(out)
         # debug_structure(out=out)
         out = jax.vmap(lambda x: self.head(x, training=training))(out)
         return out

@@ -1,6 +1,7 @@
 """Layers useful in different contexts."""
 
-from typing import Callable, Optional
+import functools
+from typing import Callable, Optional, Sequence
 
 import einops
 import jax.numpy as jnp
@@ -64,6 +65,74 @@ conv_kernel = Q[0, ...].reshape(ng, ng, ng, 1, 35)
 counts = jnp.sum(conv_kernel, axis=(0, 1, 2))
 
 
+class EquivariantMHA(nn.Module):
+    """Equivariant multi-head attention."""
+
+    num_heads: int
+    normalize_qk: bool = True
+
+    @nn.compact
+    def __call__(self, x, training: bool = False):
+        """
+        Equivariant attention.
+
+        Parameters
+        ----------
+        x : Array[batch, seq, dim]
+            Data.
+        training : bool, optional
+            Training mode.
+
+        Returns
+        -------
+            Array[batch, seq, dim]
+        """
+
+        # https://flax.readthedocs.io/en/latest/_modules/flax/linen/attention.html#MultiHeadAttention
+
+        in_features = x.shape[-1]
+        head_dim = in_features // self.num_heads
+        if in_features % self.num_heads != 0:
+            msg = f'Input dim {in_features} not divisible by number of heads {self.num_heads}'
+            raise ValueError(msg)
+
+        dense = functools.partial(
+            nn.DenseGeneral, axis=-1, features=(self.num_heads, head_dim), dtype=jnp.bfloat16
+        )
+
+        # project inputs_q to multi-headed q/k/v
+        # dimensions are then [batch..., length, n_heads, n_features_per_head]
+        query, key, value = (
+            dense(name='query')(x),
+            dense(name='key')(x),
+            dense(name='value')(x),
+        )
+
+        if self.normalize_qk:
+            # Normalizing query and key projections stabilizes training with higher
+            # LR. See ViT-22B paper http://arxiv.org/abs/2302.05442 for analysis.
+            query = nn.LayerNorm(name='query_ln', use_bias=False)(query)
+            key = nn.LayerNorm(name='key_ln', use_bias=False)(key)
+
+        # equivariant attention bias, different for each head
+        relative_attn = self.param(
+            'relative_attn',
+            nn.initializers.truncated_normal(0.02, dtype=jnp.bfloat16),
+            (subspace_dim, self.num_heads),
+        )
+
+        relative_attn_expanded = einops.einsum(
+            relative_attn, Q, 'subspace heads, seq1 seq2 subspace -> heads seq1 seq2'
+        )
+
+        # debug_structure(x=x, q=query, attn_exp=relative_attn_expanded)
+
+        x = nn.dot_product_attention(query, key, value, bias=relative_attn_expanded)
+
+        out = nn.DenseGeneral(in_features, axis=(-2, -1), name='out')(x)
+        return out
+
+
 class EquivariantLinear(nn.Module):
     kernel_init: Callable = nn.initializers.normal(stddev=1e-2, dtype=jnp.bfloat16)
 
@@ -101,7 +170,7 @@ class EquivariantLinear(nn.Module):
 class EquivariantMixerMLP(nn.Module):
     activation: Callable = nn.gelu
     dropout_rate: float = 0.0
-    head_muls: tuple[int] = (2, 1)
+    head_muls: Sequence[int] = (2, 1)
 
     @nn.compact
     def __call__(self, x, training: bool = False):
@@ -190,12 +259,12 @@ class PermInvariantEncoder(nn.Module):
     Uses mean, std, and differentiable quantiles."""
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, axis=-1, keepdims=True):
         """x: batch chan token
         Invariant over the order of tokens."""
 
-        x_mean = jnp.mean(x, axis=-1, keepdims=True)
-        x_std = jnp.std(x, axis=-1, keepdims=True)
+        x_mean = jnp.mean(x, axis=axis, keepdims=keepdims)
+        x_std = jnp.std(x, axis=axis, keepdims=keepdims)
 
         # x_whiten = (x - x_mean) / (x_std + 1e-8)
 
@@ -215,4 +284,4 @@ class PermInvariantEncoder(nn.Module):
         # quants = jnp.linspace(eps, 1 - eps, 14, dtype=jnp.bfloat16)
         # from ott.tools.soft_sort import quantile
         # x_quants = quantile(x, quants, axis=-1, weight=10 / x.shape[-1])
-        return jnp.concat([x_mean, x_std], axis=2)
+        return jnp.concat([x_mean, x_std], axis=-1)

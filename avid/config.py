@@ -245,22 +245,25 @@ class ViTInputConfig:
     patch_latent_dim: int = 384
     # Position embedding initialization. 'legendre' uses custom Legendre basis, concatenating with
     # the patch embedding. 'learned' uses standard learned embeddings that are added with the patch
-    # embedding.
+    # embedding. 'identity' doesn't apply any positional embeddings.
     pos_embed_type: str = 'learned'
 
     def build(self):
         if self.pos_embed_type == 'learned':
             pos_embed = AddPositionEmbs(name='pos_embed')
-            return ImageEmbed(
-                SingleImageEmbed(
-                    patch_size=self.patch_size,
-                    patch_latent_dim=self.patch_latent_dim,
-                    pos_embed=pos_embed,
-                ),
-                name='image_embed',
-            )
+        elif self.pos_embed_type == 'identity':
+            pos_embed = layers.Identity()
         else:
             raise ValueError('Other position embedding types not implemented yet.')
+
+        return ImageEmbed(
+            SingleImageEmbed(
+                patch_size=self.patch_size,
+                patch_latent_dim=self.patch_latent_dim,
+                pos_embed=pos_embed,
+            ),
+            name='image_embed',
+        )
 
 
 @dataclass
@@ -273,8 +276,12 @@ class ViTEncoderConfig:
     # Number of heads for MHSA.
     num_heads: int = 4
 
-    # Dropout rate applied to inputs for attention.
-    enc_dropout_rate: float = 0.2104
+    # Dropout rate applied to inputs.
+    enc_dropout_rate: float = 0.1
+
+    # Dropout rate applied to inputs during attention.
+    enc_attention_dropout_rate: float = 0.0
+
     # MLP config after attention layer. The out dim doesn't matter: it's constrained to the input.
     mlp: MLPConfig = field(default_factory=MLPConfig)
 
@@ -356,9 +363,14 @@ class ViTRegressorConfig:
     head: MLPConfig = field(default_factory=MLPConfig)
     species_embed: SpeciesEmbedConfig = field(default_factory=SpeciesEmbedConfig)
     downsample: DownsampleConfig = field(default_factory=DownsampleConfig)
+    equivariant: bool = False
     out_dim: int = 1
 
     def build(self) -> ViTRegressor:
+        if self.equivariant and self.vit_input.pos_embed_type != 'identity':
+            msg = 'Need no positional embeddings for equivariant encoder'
+            raise ValueError(msg)
+
         head = self.head.build()
         head.out_dim = self.out_dim
         return ViTRegressor(
@@ -367,6 +379,7 @@ class ViTRegressorConfig:
             head=head,
             encoder=self.encoder.build(),
             im_embed=self.vit_input.build(),
+            equivariant=self.equivariant,
         )
 
 

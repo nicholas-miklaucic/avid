@@ -62,4 +62,4 @@ def show_model(config: MainConfig, kind='diffusion', make_hlo_dot=False):
 
 if __name__ == '__main__':
     # with jax.log_compiles():
-    show_model(kind='diffusion')
+    show_model(kind='reg')

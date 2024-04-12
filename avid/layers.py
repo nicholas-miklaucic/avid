@@ -97,7 +97,7 @@ class EquivariantMHA(nn.Module):
             raise ValueError(msg)
 
         dense = functools.partial(
-            nn.DenseGeneral, axis=-1, features=(self.num_heads, head_dim), dtype=jnp.bfloat16
+            nn.DenseGeneral, axis=-1, features=(self.num_heads, head_dim), dtype=x.dtype
         )
 
         # project inputs_q to multi-headed q/k/v
@@ -111,13 +111,13 @@ class EquivariantMHA(nn.Module):
         if self.normalize_qk:
             # Normalizing query and key projections stabilizes training with higher
             # LR. See ViT-22B paper http://arxiv.org/abs/2302.05442 for analysis.
-            query = nn.LayerNorm(name='query_ln', use_bias=False)(query)
-            key = nn.LayerNorm(name='key_ln', use_bias=False)(key)
+            query = nn.LayerNorm(name='query_ln', use_bias=False, dtype=x.dtype)(query)
+            key = nn.LayerNorm(name='key_ln', use_bias=False, dtype=x.dtype)(key)
 
         # equivariant attention bias, different for each head
         relative_attn = self.param(
             'relative_attn',
-            nn.initializers.truncated_normal(0.02, dtype=jnp.bfloat16),
+            nn.initializers.truncated_normal(0.02, dtype=x.dtype),
             (subspace_dim, self.num_heads),
         )
 
@@ -129,7 +129,7 @@ class EquivariantMHA(nn.Module):
 
         x = nn.dot_product_attention(query, key, value, bias=relative_attn_expanded)
 
-        out = nn.DenseGeneral(in_features, axis=(-2, -1), name='out')(x)
+        out = nn.DenseGeneral(in_features, axis=(-2, -1), dtype=x.dtype, name='out')(x)
         return out
 
 

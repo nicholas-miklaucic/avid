@@ -142,11 +142,18 @@ class DeviceConfig:
     # Limits the number of GPUs used. 0 means no limit.
     max_gpus: int = 1
 
+    # IDs of GPUs to use.
+    gpu_ids: list[int] = field(default=[0])
+
     @property
     def jax_device(self):
         devs = jax.devices(self.device)
         if self.device == 'gpu' and self.max_gpus != 0:
-            devs = devs[: self.max_gpus]
+            idx = list(range(len(devs)))
+            order = [x for x in self.gpu_ids if x in idx] + [
+                x for x in idx if x not in self.gpu_ids
+            ]
+            devs = [devs[i] for i in order[: self.max_gpus]]
 
         if len(devs) > 1:
             return jax.sharding.PositionalSharding(devs)

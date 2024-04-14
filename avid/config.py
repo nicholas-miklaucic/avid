@@ -143,7 +143,7 @@ class DeviceConfig:
     max_gpus: int = 1
 
     # IDs of GPUs to use.
-    gpu_ids: list[int] = field(default=[0])
+    gpu_ids: list[int] = field(default_factory=list)
 
     @property
     def jax_device(self):
@@ -153,6 +153,7 @@ class DeviceConfig:
             order = [x for x in self.gpu_ids if x in idx] + [
                 x for x in idx if x not in self.gpu_ids
             ]
+            print(order)
             devs = [devs[i] for i in order[: self.max_gpus]]
 
         if len(devs) > 1:
@@ -164,6 +165,9 @@ class DeviceConfig:
         import os
 
         os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
+
+        import jax
+        jax.config.update("jax_default_device", self.jax_device)
 
 
 @dataclass

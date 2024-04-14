@@ -87,7 +87,6 @@ class EquivariantMHA(nn.Module):
         -------
             Array[batch, seq, dim]
         """
-
         # https://flax.readthedocs.io/en/latest/_modules/flax/linen/attention.html#MultiHeadAttention
 
         in_features = x.shape[-1]

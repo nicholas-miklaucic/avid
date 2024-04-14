@@ -1,6 +1,6 @@
 batch_size = 52
 do_profile = false
-num_epochs = 150
+num_epochs = 40
 regressor = "vit"
 
 [data]
@@ -24,6 +24,7 @@ show_progress = true
 [device]
 device = "gpu"
 max_gpus = 1
+gpu_ids = [1]
 
 [log]
 log_dir = "logs"
@@ -50,16 +51,16 @@ use_rmse = false
 
 [vit.vit_input]
 patch_size = 3
-patch_latent_dim = 128
+patch_latent_dim = 1024
 pos_embed_type = "identity"
 
 [vit.encoder]
-num_layers = 12
+num_layers = 8
 num_heads = 8
 enc_dropout_rate = 0.2
 
 [vit.head]
-inner_dims = [512, 512, 512]
+inner_dims = [2048, 1024, 512]
 dropout = 0.2
 equivariant = false
 

@@ -242,7 +242,7 @@ ABY_IDENTITY = jnp.array([1, 0, 1, 1, 0, 1]).reshape(6, 1, 1, 1)
 class ViTRegressor(nn.Module):
     spec_embed: ReduceSpeciesEmbed
     downsample: nn.Module
-    im_embed: ImageEmbed
+    im_embed: nn.Module
     encoder: Encoder
     head: LazyInMLP
     equivariant: bool = False
@@ -251,6 +251,7 @@ class ViTRegressor(nn.Module):
     def __call__(self, im: DataBatch, training: bool, abys=ABY_IDENTITY):
         out = self.spec_embed(im, training=training)
         out = self.downsample(out)
+
         out = self.im_embed(out)
 
         encoder = self.encoder.copy(equivariant=self.equivariant)
@@ -258,7 +259,7 @@ class ViTRegressor(nn.Module):
 
         # batch seq dim -> batch dim*2
         out = PermInvariantEncoder()(out, axis=1, keepdims=False)
-        out = nn.LayerNorm()(out)
+        out = nn.LayerNorm(dtype=out.dtype)(out)
         # debug_structure(out=out)
         out = jax.vmap(lambda x: self.head(x, training=training))(out)
         return out

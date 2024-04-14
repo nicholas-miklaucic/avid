@@ -41,15 +41,15 @@ class LazyInMLP(nn.Module):
 
         for next_dim in self.inner_dims:
             x = nn.Dense(
-                next_dim, kernel_init=self.kernel_init, bias_init=self.bias_init, dtype=jnp.bfloat16
+                next_dim, kernel_init=self.kernel_init, bias_init=self.bias_init, dtype=x.dtype
             )(x)
             x = self.inner_act(x)
             x = nn.Dropout(self.dropout_rate, deterministic=not training)(x)
-            x = nn.LayerNorm()(x)
+            x = nn.LayerNorm(dtype=x.dtype)(x)
             _curr_dim = next_dim
 
         x = nn.Dense(
-            out_dim, kernel_init=self.kernel_init, bias_init=self.bias_init, dtype=jnp.bfloat16
+            out_dim, kernel_init=self.kernel_init, bias_init=self.bias_init, dtype=x.dtype
         )(x)
         x = self.final_act(x)
         return x

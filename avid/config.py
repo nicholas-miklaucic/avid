@@ -247,6 +247,10 @@ class ViTInputConfig:
     # the patch embedding. 'learned' uses standard learned embeddings that are added with the patch
     # embedding. 'identity' doesn't apply any positional embeddings.
     pos_embed_type: str = 'learned'
+    # Equivariance: ensures patches are invariant to rotations.
+    equivariant: bool = True
+    # Patch heads.
+    patch_heads: int = 8
 
     def build(self):
         if self.pos_embed_type == 'learned':
@@ -256,12 +260,22 @@ class ViTInputConfig:
         else:
             raise ValueError('Other position embedding types not implemented yet.')
 
-        return ImageEmbed(
-            SingleImageEmbed(
+        if self.equivariant:
+            im_embed = O3ImageEmbed(
+                patch_size=self.patch_size,
+                patch_latent_dim=self.patch_latent_dim,
+                patch_heads=self.patch_heads,
+                pos_embed=pos_embed,
+            )
+        else:
+            im_embed = SingleImageEmbed(
                 patch_size=self.patch_size,
                 patch_latent_dim=self.patch_latent_dim,
                 pos_embed=pos_embed,
-            ),
+            )
+
+        return ImageEmbed(
+            im_embed,
             name='image_embed',
         )
 

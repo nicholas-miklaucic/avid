@@ -1,6 +1,6 @@
 batch_size = 52
 do_profile = false
-num_epochs = 100
+num_epochs = 150
 regressor = "vit"
 
 [data]
@@ -32,9 +32,9 @@ logs_per_epoch = 8
 [train]
 lr_schedule_kind = "cosine"
 start_lr_frac = 0.5
-base_lr = 0.004
-end_lr_frac = 0.04
-weight_decay = 0.1
+base_lr = 0.008
+end_lr_frac = 0.03
+weight_decay = 0.15
 beta_1 = 0.9
 beta_2 = 0.999
 nestorov = true
@@ -45,22 +45,22 @@ equivariant = true
 out_dim = 1
 
 [train.loss]
-loss_delta = 0.15
+loss_delta = 0.03
 use_rmse = false
 
 [vit.vit_input]
 patch_size = 3
-patch_latent_dim = 512
+patch_latent_dim = 128
 pos_embed_type = "identity"
 
 [vit.encoder]
-num_layers = 4
-num_heads = 4
+num_layers = 12
+num_heads = 8
 enc_dropout_rate = 0.2
 
 [vit.head]
-inner_dims = [2048, 1024, 512]
-dropout = 0.1
+inner_dims = [512, 512, 512]
+dropout = 0.2
 equivariant = false
 
 [vit.species_embed]
@@ -81,11 +81,6 @@ name = "gelu"
 
 [vit.head.final_activation]
 name = "Identity"
-
-[vit.species_embed.spec_embed]
-inner_dims = []
-out_dim = 64
-dropout = 0.1
 
 [vit.encoder.mlp.activation]
 name = "gelu"

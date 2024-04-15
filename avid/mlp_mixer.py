@@ -4,12 +4,11 @@ import einops
 import jax
 import jax.numpy as jnp
 import numpy as np
-from einops import rearrange, repeat
+from einops import rearrange
 from flax import linen as nn
 from jaxtyping import Array, Float
 
 from avid.databatch import DataBatch
-from avid.diffusion import DiffusionBackbone, SinusoidalEmbedding
 from avid.encoder import ReduceSpeciesEmbed
 from avid.layers import LazyInMLP, MLPMixer, PermInvariantEncoder
 from avid.utils import tcheck
@@ -111,29 +110,3 @@ class MLPMixerRegressor(nn.Module):
         # debug_structure(out=out)
         out = jax.vmap(lambda x: self.head(x, training=training))(out)
         return out
-
-
-class MLPMixerDiffuser(DiffusionBackbone):
-    embed_dims: int
-    embed_min_freq: float
-    embed_max_freq: float
-    mixer: MLPMixer
-
-    @nn.compact
-    def __call__(
-        self, noisy_images: jnp.ndarray, noise_variances: jnp.ndarray, training: bool
-    ) -> jnp.ndarray:
-        sinusoidal_embedding = SinusoidalEmbedding(
-            self.embed_dims, self.embed_min_freq, self.embed_max_freq
-        )
-
-        e = repeat(
-            sinusoidal_embedding(noise_variances), 'b 1 embed -> b d embed', d=noisy_images.shape[1]
-        ).astype(jnp.bfloat16)
-
-        # TODO in the future try adaLN-zero here
-        x = jnp.concat([e, noisy_images], axis=2)
-        y = self.mixer(x, training=training)
-
-        head = LazyInMLP(inner_dims=(), out_dim=noisy_images.shape[-1], name='head')
-        return head(y, training=training)

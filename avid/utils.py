@@ -192,6 +192,7 @@ def debug_stat(*args, **kwargs):
 
 def flax_summary(
     mod: nn.Module,
+    rngs={},
     *args,
     compute_flops=True,
     compute_vjp_flops=True,
@@ -202,9 +203,9 @@ def flax_summary(
     depth=None,
     **kwargs,
 ):
-    tabulate_fn = nn.tabulate(
-        mod,
-        jax.random.key(0),
+    out = mod.tabulate(
+        dict(params=jax.random.key(0), **rngs),
+        *args,
         compute_flops=compute_flops,
         compute_vjp_flops=compute_vjp_flops,
         console_kwargs=console_kwargs,
@@ -212,8 +213,8 @@ def flax_summary(
         column_kwargs=column_kwargs,
         show_repeated=show_repeated,
         depth=depth,
+        **kwargs,
     )
-    out = tabulate_fn(*args, **kwargs)
 
     # hack to control numbers so they're formatted reasonably
     # 12580739072 flops is not very helpful

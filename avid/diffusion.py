@@ -2,127 +2,214 @@
 
 # https://github.com/HMUNACHI/nanodl/blob/main/nanodl/__src/models/diffusion.py
 
-import time
-from typing import Tuple
+import abc
+from typing import Sequence, Tuple
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from chex import dataclass
+from eins import EinsOp
+
+from avid.layers import LazyInMLP
+from avid.vit import Encoder
 
 
-class SinusoidalEmbedding(nn.Module):
-    """
-    Implements sinusoidal embeddings as a layer in a neural network using JAX.
+@dataclass
+class DiffusionInput:
+    """Input to a diffusion step."""
 
-    This layer generates sinusoidal embeddings based on input positions and a range of frequencies, producing embeddings that capture positional information in a continuous manner. It's particularly useful in models where the notion of position is crucial, such as in generative models for images and audio.
+    # Noised latent.
+    x_t: jax.Array
+    # Time step.
+    t: jax.Array
+    # Class/label, as an int.
+    y: jax.Array
 
-    Attributes:
-        embedding_dims (int): The dimensionality of the output embeddings.
-        embedding_min_frequency (float): The minimum frequency used in the sinusoidal embedding.
-        embedding_max_frequency (float): The maximum frequency used in the sinusoidal embedding.
 
-    Methods:
-        setup(): Initializes the layer by computing the angular speeds for the sinusoidal functions based on the specified frequency range.
-        __call__(x: jnp.ndarray): Generates the sinusoidal embeddings for the input positions.
-    """
+# https://github.com/facebookresearch/DiT/blob/main/models.py
+class TimestepEmbed(nn.Module):
+    frequency_embed_dim: int
+    mlp: nn.Module
 
-    embedding_dims: int
-    embedding_min_frequency: float
-    embedding_max_frequency: float
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        """
+        Create sinusoidal timestep embeddings.
+        :param t: a 1-D Tensor of N indices, one per batch element.
+                          These may be fractional.
+        :param dim: the dimension of the output.
+        :param max_period: controls the minimum frequency of the embeddings.
+        :return: an (N, D) Tensor of positional embeddings.
+        """
+        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+        half = dim // 2
+        freqs = jnp.exp(-jnp.log(max_period) * jnp.arange(0, half, dtype=jnp.float32) / half)
+        args = t[:, None] * freqs[None]
+        embedding = jnp.concat([jnp.cos(args), jnp.sin(args)], axis=-1)
+        if dim % 2:
+            embedding = jnp.concat([embedding, jnp.zeros_like(embedding[:, :1])], axis=-1)
+        return embedding
+
+    @nn.compact
+    def __call__(self, t, training: bool):
+        t_freq = self.timestep_embedding(t, self.frequency_embed_dim)
+        t_emb = self.mlp(t_freq, training=training)
+        return t_emb
+
+
+class LabelEmbed(nn.Module):
+    """Diffusion class label embedding: reserves an embedding for a Ø class."""
+
+    # Number of actual classes: one is added for the null class.
+    num_classes: int
+
+    # Embed dimension.
+    embed_dim: int
 
     def setup(self):
-        num = self.embedding_dims // 2
-        start = jnp.log(self.embedding_min_frequency)
-        stop = jnp.log(self.embedding_max_frequency)
-        frequencies = jnp.exp(jnp.linspace(start, stop, num))
-        self.angular_speeds = 2.0 * jnp.pi * frequencies
+        self.embeddings = nn.Embed(self.num_classes + 1, self.embed_dim)
 
-    def __call__(self, x):
-        embeddings = jnp.concatenate(
-            [jnp.sin(self.angular_speeds * x), jnp.cos(self.angular_speeds * x)], axis=-1
-        )
-        return embeddings
+    def __call__(self, y: jax.Array) -> jax.Array:
+        return self.embeddings(y)
 
 
-class DiffusionBackbone(nn.Module):
+class DiffusionNoiseSchedule(metaclass=abc.ABCMeta):
+    """Diffusion noise schedule interface."""
+
+    @property
+    def max_t(self) -> int:
+        raise NotImplementedError
+
+    def alpha(self, times):
+        """Gets α_t schedule, for floats between 0 and 1. Should be alpha_bar."""
+        raise NotImplementedError
+
+    def alpha_beta(self, times):
+        """Gets α_t and β_t schedule, for times with T = max_t."""
+        alpha = self.alpha(times / self.max_t)
+        return {'alpha': alpha, 'beta': 1 - (alpha / self.alpha((times - 1) / self.max_t))}
+
+    def add_noise(self, x, t, noise):
+        alpha = self.alpha(t / self.max_t)
+        return x * jnp.sqrt(alpha) + jnp.sqrt(1 - alpha) * noise
+
+
+@dataclass
+class KumaraswamySchedule(DiffusionNoiseSchedule):
+    """
+    Flexible noise schedule parameterized with Kumaraswamy CDF.
+    a, b = (1.7, 1.9) is close to the standard cosine schedule.
+    """
+
+    a: float = 1.7
+    b: float = 1.9
+    timesteps: int = 100
+
+    @property
+    def max_t(self) -> int:
+        return self.timesteps
+
+    def alpha(self, times) -> jax.Array:
+        return (1 - (times / self.max_t) ** self.a) ** self.b
+
+
+class DiffusionBackbone:
     """Abstract model class. Returns denoised images given noisy inputs and noise scale."""
 
-    pass
+    def eps_sigma(self, data: DiffusionInput, schedule: DiffusionNoiseSchedule, training: bool):
+        """Returns the predicted noise from the input and times."""
+        raise NotImplementedError
+
+    def __call__(self, data: DiffusionInput, schedule: DiffusionNoiseSchedule, training: bool):
+        return self.eps_sigma(data, schedule, training=training)
 
 
 class DiffusionModel(nn.Module):
     """
     Implements a diffusion model for image generation using JAX.
-
-    Methods:
-        setup(): Initializes the diffusion model including the U-Net architecture.
-        diffusion_schedule(diffusion_times: jnp.ndarray): Computes the noise and signal rates for given diffusion times.
-        denoise(noisy_images: jnp.ndarray, noise_rates: jnp.ndarray, signal_rates: jnp.ndarray): Denoises images given their noise and signal rates.
-        __call__(images: jnp.ndarray): Applies the diffusion process to a batch of images.
-        reverse_diffusion(initial_noise: jnp.ndarray, diffusion_steps: int): Reverses the diffusion process to generate images from noise.
-        generate(num_images: int, diffusion_steps: int): Generates images by reversing the diffusion process from random noise.
     """
 
     model: DiffusionBackbone
-    min_signal_rate: float = 0.02
-    max_signal_rate: float = 0.95
+    schedule: DiffusionNoiseSchedule
 
     def setup(self):
         self.backbone = self.model.copy()
 
-    def diffusion_schedule(self, diffusion_times: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        start_angle = jnp.arccos(self.max_signal_rate)
-        end_angle = jnp.arccos(self.min_signal_rate)
-        diffusion_angles = start_angle + diffusion_times * (end_angle - start_angle)
-        signal_rates = jnp.cos(diffusion_angles)
-        noise_rates = jnp.sin(diffusion_angles)
-        return noise_rates.astype(jnp.bfloat16), signal_rates.astype(jnp.bfloat16)
+    def mu_eps_sigma(self, data: DiffusionInput, training: bool):
+        """Gets predicted images and covariance given noisy inputs and time."""
+        out = self.backbone(data, self.schedule, training=training)
+        eps = out['eps']
+        sigma = out['sigma']
+        sched = self.schedule.alpha_beta(data.t)
+        pred_images = 1 / jnp.sqrt(sched['alpha']) * (data.x_t - jnp.sqrt(1 - sched['alpha']) * eps)
+        return {'mu': pred_images, 'eps': eps, 'sigma': sigma}
 
-    def denoise(
-        self,
-        noisy_images: jnp.ndarray,
-        noise_rates: jnp.ndarray,
-        signal_rates: jnp.ndarray,
-        training: bool,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        pred_noises = self.backbone(noisy_images, noise_rates**2, training=training)
-        pred_images = (noisy_images - noise_rates * pred_noises) / signal_rates
-        return pred_noises, pred_images
+    def q_sample(self, x_t, t, noise):
+        return self.schedule.add_noise(x_t, t, noise)
 
-    def __call__(self, images: jnp.ndarray, training: bool) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        key = jax.random.PRNGKey(int(time.time()))
-        noises = jax.random.normal(key, shape=images.shape, dtype=jnp.bfloat16)
-        batch_size = images.shape[0]
-        diffusion_times = jax.random.uniform(key, shape=(batch_size, 1, 1), minval=0.0, maxval=1.0)
-        noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
-        noisy_images = signal_rates * images + noise_rates * noises
-        # debug_structure(
-        #     n_im=noisy_images, sr=signal_rates, nr=noise_rates, noises=noises, ims=images
-        # )
-        pred_noises, pred_images = self.denoise(
-            noisy_images, noise_rates, signal_rates, training=training
+    def __call__(self, data: DiffusionInput, training: bool):
+        """Gets μ, ε, and Σ."""
+        return self.mu_eps_sigma(data, training=training)
+
+    def generation_loop(self, data: DiffusionInput, rng):
+        """Simple sampler that generates images from the given state. Use a real sampler if you need to."""
+
+        def step(
+            i: int, state_rng: Tuple[DiffusionInput, jax.Array]
+        ) -> Tuple[DiffusionInput, jax.Array]:
+            state, rng = state_rng
+            curr_rng, next_rng = jax.random.split(rng)
+            out = self.mu_eps_sigma(state, training=False)
+            noise = jax.random.normal(curr_rng, shape=out['mu'].shape)
+            x_tm1 = out['mu'] * out['sigma'] * noise
+            next_state = DiffusionInput(x_tm1, state.t - 1, state.y)
+            return (next_state, next_rng)
+
+        last_state, last_rng = jax.lax.fori_loop(0, data.t, step, (data, rng))
+        return last_state
+
+
+@dataclass
+class DiT(DiffusionBackbone, nn.Module):
+    condition_mlp_dims: Sequence[int]
+    time_dim: int
+    time_mlp: nn.Module
+    num_classes: int
+    label_dim: int
+    encoder: Encoder
+    hidden_dim: int
+    condition_dropout: float = 0.0
+
+    def setup(self):
+        self.time_embed = TimestepEmbed(self.time_dim, mlp=self.time_mlp)
+        self.label_embed = LabelEmbed(num_classes=self.num_classes, embed_dim=self.label_dim)
+        self.condition_mlp = LazyInMLP(
+            self.condition_mlp_dims,
+            out_dim=6 * self.hidden_dim,
+            dropout_rate=self.condition_dropout,
         )
-        return pred_noises, pred_images
+        self.aby_scale = self.param(
+            'aby_scale', lambda key: jnp.array([0, 1, 1, 0, 1, 1], dtype=jnp.float32)
+        )
 
-    def reverse_diffusion(self, initial_noise: jnp.ndarray, diffusion_steps: int) -> jnp.ndarray:
-        num_images = initial_noise.shape[0]
-        step_size = 1.0 / diffusion_steps
-        next_noisy_images = initial_noise
+    def eps_sigma(self, data: DiffusionInput, schedule: DiffusionNoiseSchedule, training: bool):
+        t_emb = self.time_embed(jnp.broadcast_to(data.t, (data.x_t.shape[0],)), training=training)
+        y_emb = self.label_embed(data.y)
+        cond_emb = jnp.concatenate([t_emb, y_emb], axis=-1)
+        abys = self.condition_mlp(cond_emb, training=training)
 
-        for step in range(diffusion_steps):
-            diffusion_times = jnp.ones((num_images, 1, 1, 1, 1)) - step * step_size
-            noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
-            pred_noises, pred_images = self.denoise(
-                next_noisy_images, noise_rates, signal_rates, training=False
-            )
-            next_diffusion_times = diffusion_times - step_size
-            next_noise_rates, next_signal_rates = self.diffusion_schedule(next_diffusion_times)
-            next_noisy_images = next_signal_rates * pred_images + next_noise_rates * pred_noises
+        abys = EinsOp('batch (dim aby), aby -> aby batch 1 dim', combine='multiply')(
+            abys, self.aby_scale
+        ).astype(jnp.bfloat16)
 
-        return pred_images
+        x_t_reshaped = EinsOp('batch n n n dim -> batch (n n n) dim')(data.x_t).astype(jnp.bfloat16)
 
-    def generate(self, images_shape=(1, 24, 24, 24, 64), diffusion_steps: int = 20) -> jnp.ndarray:
-        key = jax.random.PRNGKey(int(time.time()))
-        noises = jax.random.normal(key, shape=images_shape)
+        unflatten = EinsOp('batch (n=8 n n) dim -> batch n n n dim')
 
-        return self.reverse_diffusion(noises, diffusion_steps)
+        return {
+            'eps': unflatten(self.encoder(x_t_reshaped, abys, training=training)).astype(
+                jnp.bfloat16
+            ),
+            'sigma': schedule.alpha_beta(data.t)['beta'],
+        }

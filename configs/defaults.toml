@@ -2,6 +2,7 @@ batch_size = 52
 do_profile = false
 num_epochs = 100
 regressor = "vit"
+task = "e_form"
 
 [voxelizer]
 max_unique_species = 5
@@ -31,6 +32,7 @@ show_progress = true
 [device]
 device = "gpu"
 max_gpus = 1
+gpu_ids = []
 
 [log]
 log_dir = "logs"
@@ -48,7 +50,16 @@ nestorov = true
 max_grad_norm = 1.0
 
 [vit]
+equivariant = false
 out_dim = 1
+
+[diled]
+patch_latent_dim = 384
+patch_conv_sizes = [ 7,]
+patch_conv_strides = [ 3,]
+patch_conv_features = [ 384,]
+species_embed_dim = 128
+w = 1
 
 [mlp]
 patch_size = 3
@@ -57,19 +68,18 @@ patch_latent_dim = 512
 num_blocks = 4
 out_dim = 1
 
-[train.loss]
-loss_delta = 0.1
-use_rmse = false
-
 [vit.vit_input]
 patch_size = 4
 patch_latent_dim = 384
 pos_embed_type = "learned"
+equivariant = true
+patch_heads = 8
 
 [vit.encoder]
 num_layers = 2
 num_heads = 4
-enc_dropout_rate = 0.2104
+enc_dropout_rate = 0.1
+enc_attention_dropout_rate = 0.0
 
 [vit.head]
 inner_dims = []
@@ -85,16 +95,22 @@ factor = [ 2,]
 channels_out = [ 256,]
 kernel_size = [ 3,]
 
-[diffusion.unet]
-widths = [ 8, 16,]
-block_depth = 1
-embed_dim = 8
-embed_min_freq = 1.0
-embed_max_freq = 1000.0
+[diled.backbone]
+condition_mlp_dims = [ 128,]
+time_dim = 64
+label_dim = 64
+condition_dropout = 0.0
+hidden_dim = 384
 
-[diffusion.diffusion]
-min_signal_rate = 0.02
-max_signal_rate = 0.95
+[diled.diffusion]
+schedule_a = 1.7
+schedule_b = 1.9
+timesteps = 100
+class_dropout = 0.5
+
+[diled.category]
+category_loss_type = "e_form"
+num_cats = 8
 
 [mlp.token_mixer]
 inner_dims = []
@@ -120,6 +136,10 @@ factor = [ 2,]
 channels_out = [ 256,]
 kernel_size = [ 3,]
 
+[train.loss.reg_loss]
+loss_delta = 0.1
+use_rmse = false
+
 [vit.encoder.mlp]
 inner_dims = []
 dropout = 0.1
@@ -136,6 +156,17 @@ inner_dims = []
 out_dim = 64
 dropout = 0.1
 equivariant = false
+
+[diled.backbone.time_mlp]
+inner_dims = []
+dropout = 0.1
+equivariant = false
+
+[diled.backbone.encoder]
+num_layers = 2
+num_heads = 4
+enc_dropout_rate = 0.1
+enc_attention_dropout_rate = 0.0
 
 [mlp.token_mixer.activation]
 name = "gelu"
@@ -173,8 +204,25 @@ name = "relu"
 [vit.species_embed.spec_embed.final_activation]
 name = "Identity"
 
+[diled.backbone.time_mlp.activation]
+name = "relu"
+
+[diled.backbone.time_mlp.final_activation]
+name = "Identity"
+
+[diled.backbone.encoder.mlp]
+inner_dims = []
+dropout = 0.1
+equivariant = false
+
 [mlp.species_embed.spec_embed.activation]
 name = "relu"
 
 [mlp.species_embed.spec_embed.final_activation]
+name = "Identity"
+
+[diled.backbone.encoder.mlp.activation]
+name = "relu"
+
+[diled.backbone.encoder.mlp.final_activation]
 name = "Identity"

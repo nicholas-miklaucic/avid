@@ -228,7 +228,7 @@ class Encoder(nn.Module):
                 attention_dropout_rate=self.attention_dropout_rate,
                 name=f'encoderblock_{lyr}',
                 num_heads=self.num_heads,
-                mlp=self.mlp,
+                mlp=self.mlp.copy(),
                 equivariant=self.equivariant,
             )(x, abys, training=training)
         encoded = nn.LayerNorm(name='encoder_norm', dtype=x.dtype)(x)

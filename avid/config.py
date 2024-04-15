@@ -12,11 +12,11 @@ from flax.struct import dataclass
 from pyrallis import field
 
 from avid import layers
-from avid.diffusion import DiffusionBackbone, DiffusionModel
+from avid.diffusion import DiffusionBackbone, DiffusionModel, DiT, KumaraswamySchedule
+from avid.diled import DiLED, EFormCategory, EncoderDecoder
 from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
 from avid.layers import EquivariantMixerMLP, Identity, LazyInMLP, MLPMixer
-from avid.mlp_mixer import MLPMixerDiffuser, MLPMixerRegressor, O3ImageEmbed
-from avid.unet import UNet
+from avid.mlp_mixer import MLPMixerRegressor, O3ImageEmbed
 from avid.utils import ELEM_VALS
 from avid.vit import (
     AddPositionEmbs,
@@ -153,7 +153,6 @@ class DeviceConfig:
             order = [x for x in self.gpu_ids if x in idx] + [
                 x for x in idx if x not in self.gpu_ids
             ]
-            print(order)
             devs = [devs[i] for i in order[: self.max_gpus]]
 
         if len(devs) > 1:
@@ -167,7 +166,8 @@ class DeviceConfig:
         os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
         import jax
-        jax.config.update("jax_default_device", self.jax_device)
+
+        jax.config.update('jax_default_device', self.jax_device)
 
 
 @dataclass
@@ -310,6 +310,9 @@ class ViTEncoderConfig:
     # MLP config after attention layer. The out dim doesn't matter: it's constrained to the input.
     mlp: MLPConfig = field(default_factory=MLPConfig)
 
+    # Whether equivariant attention is used.
+    equivariant: bool = False
+
     def build(self) -> Encoder:
         return Encoder(
             num_layers=self.num_layers,
@@ -317,6 +320,7 @@ class ViTEncoderConfig:
             dropout_rate=self.enc_dropout_rate,
             attention_dropout_rate=self.enc_attention_dropout_rate,
             mlp=self.mlp.build(),
+            equivariant=self.equivariant,
         )
 
 
@@ -448,31 +452,26 @@ class MLPMixerConfig:
 
 
 @dataclass
-class UNetConfig:
-    """UNet configuration."""
+class DiTConfig:
+    """Diffusion transformer configuration."""
 
-    # Output channels for each block.
-    widths: list[int] = field(default_factory=lambda: [8, 16])
+    condition_mlp_dims: list[int] = field(default_factory=lambda: [128])
+    time_dim: int = 64
+    time_mlp: MLPConfig = field(default_factory=MLPConfig)
+    label_dim: int = 64
+    encoder: ViTEncoderConfig = field(default_factory=ViTEncoderConfig)
+    condition_dropout: float = 0.0
 
-    # Number of residual blocks per layer.
-    block_depth: int = 1
-
-    # Positional encoding dimension.
-    embed_dim: int = 8
-
-    # The minimum sinusoidal frequency.
-    embed_min_freq: float = 1.0
-
-    # The maximum frequency.
-    embed_max_freq: float = 1000.0
-
-    def build(self) -> UNet:
-        return UNet(
-            widths=self.widths,
-            block_depth=self.block_depth,
-            embed_dims=self.embed_dim,
-            embed_max_freq=self.embed_max_freq,
-            embed_min_freq=self.embed_min_freq,
+    def build(self, num_classes: int, hidden_dim: int) -> DiT:
+        return DiT(
+            condition_mlp_dims=self.condition_mlp_dims,
+            time_dim=self.time_dim,
+            time_mlp=self.time_mlp.build(),
+            num_classes=num_classes,
+            label_dim=self.label_dim,
+            encoder=self.encoder.build(),
+            condition_dropout=self.condition_dropout,
+            hidden_dim=hidden_dim,
         )
 
 
@@ -480,38 +479,76 @@ class UNetConfig:
 class DiffusionConfig:
     """Diffusion model configuration."""
 
-    # Minimum signal.
-    min_signal_rate: float = 0.02
-    # Maximum signal.
-    max_signal_rate: float = 0.95
+    # Noise schedule params. (1, 1) is linear, (1.7, 1.9) is near cosine.
+    schedule_a: float = 1.7
+    schedule_b: float = 1.9
+    # Time steps.
+    timesteps: int = 100
+    # Class dropout rate.
+    class_dropout: float = 0.5
 
     def build(self, model: DiffusionBackbone) -> DiffusionModel:
         return DiffusionModel(
-            min_signal_rate=self.min_signal_rate,
-            max_signal_rate=self.max_signal_rate,
             model=model,
+            schedule=KumaraswamySchedule(
+                a=self.schedule_a, b=self.schedule_b, timesteps=self.timesteps
+            ),
         )
 
 
 @dataclass
-class DiffusionUNetConfig:
-    """Config for diffusion using UNet."""
+class DiffusionCategoryConfig:
+    # Category loss type.
+    category_loss_type: str = 'e_form'
 
-    unet: UNetConfig = field(default_factory=UNetConfig)
+    # Number of categories.
+    num_cats: int = 8
+
+    def build(self):
+        if self.category_loss_type == 'e_form':
+            return EFormCategory(num_cats=self.num_cats)
+
+
+@dataclass
+class DiLEDConfig:
+    """DiLED configuration."""
+
+    patch_latent_dim: int = 384
+    patch_conv_sizes: list[int] = field(default_factory=lambda: [7])
+    patch_conv_strides: list[int] = field(default_factory=lambda: [3])
+    patch_conv_features: list[int] = field(default_factory=lambda: [384])
+    species_embed_dim: int = 128
+    backbone: DiTConfig = field(default_factory=DiTConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
+    category: DiffusionCategoryConfig = field(default_factory=DiffusionCategoryConfig)
+    w: float = 1
 
-    # TODO delete this entirely: diffusion and backbone parameters are separate
+    def build(self) -> DiLED:
+        enc_dec = EncoderDecoder(
+            patch_latent_dim=self.patch_latent_dim,
+            patch_conv_strides=self.patch_conv_strides,
+            patch_conv_features=self.patch_conv_features,
+            patch_conv_sizes=self.patch_conv_sizes,
+            species_embed_dim=self.species_embed_dim,
+            n_species=len(ELEM_VALS),
+        )
 
-    def build(self) -> DiffusionModel:
-        return DiffusionModel(
-            min_signal_rate=self.diffusion.min_signal_rate,
-            max_signal_rate=self.diffusion.max_signal_rate,
-            model=self.unet.build(),
+        category = self.category.build()
+
+        dit = self.backbone.build(
+            num_classes=category.num_categories, hidden_dim=self.patch_latent_dim
+        )
+        return DiLED(
+            encoder_decoder=enc_dec,
+            diffusion=self.diffusion.build(dit),
+            category=self.category.build(),
+            class_dropout=self.diffusion.class_dropout,
+            w=self.w,
         )
 
 
 @dataclass
-class LossConfig:
+class RegressionLossConfig:
     """Config defining the loss function."""
 
     # delta for smooth_l1_loss. delta = 0 is L1 loss, and high delta behaves like L2 loss.
@@ -528,6 +565,16 @@ class LossConfig:
                 optax.losses.huber_loss(preds, targets, delta=self.loss_delta) / self.loss_delta
             ).mean(),
         )
+
+
+@dataclass
+class LossConfig:
+    """Config defining the loss function."""
+
+    reg_loss: RegressionLossConfig = field(default_factory=RegressionLossConfig)
+
+    def regression_loss(self, preds, targets):
+        return self.reg_loss.regression_loss(preds, targets)
 
 
 @dataclass
@@ -615,10 +662,13 @@ class MainConfig:
     log: LogConfig = field(default_factory=LogConfig)
     train: TrainingConfig = field(default_factory=TrainingConfig)
     vit: ViTRegressorConfig = field(default_factory=ViTRegressorConfig)
-    diffusion: DiffusionUNetConfig = field(default_factory=DiffusionUNetConfig)
+    # diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
+    diled: DiLEDConfig = field(default_factory=DiLEDConfig)
     mlp: MLPMixerConfig = field(default_factory=MLPMixerConfig)
 
     regressor: str = 'vit'
+
+    task: str = 'e_form'
 
     def __post_init__(self):
         if self.batch_size % self.data.data_batch_size != 0:
@@ -629,6 +679,9 @@ class MainConfig:
             )
 
         self.cli.set_up_logging()
+        import warnings
+
+        warnings.filterwarnings(message='Explicitly requested dtype', action='ignore')
         if not self.log.log_dir.exists():
             raise ValueError(f'Log directory {self.log.log_dir} does not exist!')
 
@@ -644,14 +697,14 @@ class MainConfig:
     def build_vit(self) -> ViTRegressor:
         return self.vit.build()
 
-    def build_diffusion(self) -> DiffusionModel:
-        diffuser = MLPMixerDiffuser(
-            embed_dims=self.diffusion.unet.embed_dim,
-            embed_max_freq=self.diffusion.unet.embed_max_freq,
-            embed_min_freq=self.diffusion.unet.embed_min_freq,
-            mixer=self.build_mlp().mixer,
-        )
-        return self.diffusion.diffusion.build(diffuser)
+    # def build_diffusion(self) -> DiffusionModel:
+    #     diffuser = MLPMixerDiffuser(
+    #         embed_dims=self.diffusion.embed_dim,
+    #         embed_max_freq=self.diffusion.unet.embed_max_freq,
+    #         embed_min_freq=self.diffusion.unet.embed_min_freq,
+    #         mixer=self.build_mlp().mixer,
+    #     )
+    #     return self.diffusion.diffusion.build(diffuser)
 
     def build_mlp(self) -> MLPMixerRegressor:
         return self.mlp.build()
@@ -661,6 +714,9 @@ class MainConfig:
             return self.build_vit()
         elif self.regressor == 'mlp':
             return self.build_mlp()
+
+    def build_diled(self):
+        return self.diled.build()
 
 
 if __name__ == '__main__':

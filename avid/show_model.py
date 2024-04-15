@@ -1,12 +1,12 @@
 import subprocess
 
 import jax
+import jax.numpy as jnp
 import pyrallis
 from jax.lib import xla_client
 
 from avid.config import MainConfig
 from avid.dataset import load_file
-from avid.training_state import DiffusionDataParallelTrainer
 from avid.utils import debug_structure, flax_summary
 
 
@@ -16,28 +16,31 @@ def to_dot_graph(x):
 
 
 @pyrallis.argparsing.wrap()
-def show_model(config: MainConfig, kind='diffusion', make_hlo_dot=False):
+def show_model(config: MainConfig, make_hlo_dot=False):
     kwargs = dict(training=False)
     batch = load_file(config, 0)
 
-    if kind == 'reg':
+    if config.task == 'e_form':
         mod = config.build_regressor()
         enc_batch = {'im': batch}
-    elif kind == 'diffusion':
-        trainer = DiffusionDataParallelTrainer(config, weights_filename='test')
-        mod = trainer.model
+        rngs = {}
+    elif config.task == 'diled':
+        mod = config.build_diled()
         enc_batch = {
-            'images': trainer.encode(batch),
+            'data': batch,
         }
-
+        rngs = {'noise': jax.random.key(123), 'time': jax.random.key(234)}
     kwargs.update(enc_batch)
-    out, params = mod.init_with_output(jax.random.key(0), **kwargs)
+    out, params = mod.init_with_output(dict(params=jax.random.key(0), **rngs), **kwargs)
     debug_structure(module=mod, out=out)
-    flax_summary(mod, **kwargs)
+    flax_summary(mod, rngs=rngs, **kwargs)
 
     def loss(params):
         preds = mod.apply(params, batch, training=False)
-        return config.train.loss.regression_loss(preds, batch.e_form.reshape(-1, 1))
+        if config.task == 'e_form':
+            return config.train.loss.regression_loss(preds, batch.e_form.reshape(-1, 1))
+        else:
+            return jnp.mean(preds)
 
     if not make_hlo_dot:
         return
@@ -62,4 +65,4 @@ def show_model(config: MainConfig, kind='diffusion', make_hlo_dot=False):
 
 if __name__ == '__main__':
     # with jax.log_compiles():
-    show_model(kind='reg')
+    show_model()

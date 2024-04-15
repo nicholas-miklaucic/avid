@@ -43,8 +43,20 @@ name = "relu"
 [vit.species_embed.spec_embed.final_activation]
 name = "Identity"
 
+[diled.backbone.time_mlp.activation]
+name = "relu"
+
+[diled.backbone.time_mlp.final_activation]
+name = "Identity"
+
 [mlp.species_embed.spec_embed.activation]
 name = "relu"
 
 [mlp.species_embed.spec_embed.final_activation]
+name = "Identity"
+
+[diled.backbone.encoder.mlp.activation]
+name = "relu"
+
+[diled.backbone.encoder.mlp.final_activation]
 name = "Identity"

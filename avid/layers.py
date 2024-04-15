@@ -22,8 +22,8 @@ class Identity(nn.Module):
 class LazyInMLP(nn.Module):
     """Customizable MLP with input dimension inferred at runtime."""
 
-    inner_dims: tuple[int]
-    out_dim: Optional[int]
+    inner_dims: Sequence[int]
+    out_dim: Optional[int] = None
     inner_act: Callable = nn.relu
     final_act: Callable = Identity()
     dropout_rate: float = 0.0

@@ -226,6 +226,7 @@ class TrainingRun:
                     config=self.config.train.loss,
                     state=self.test_state,
                     batch=test_batch,
+                    rng=self.rng
                 )
 
             for metric, value in self.test_state.metrics.compute().items():

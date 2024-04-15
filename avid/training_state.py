@@ -35,6 +35,9 @@ class RegressionMetrics(metrics.Collection):
 @struct.dataclass
 class DiffusionMetrics(metrics.Collection):
     loss: metrics.Average.from_output('loss')
+    rec_loss: metrics.Average.from_output('rec_loss')
+    other_loss: metrics.Average.from_output('other_loss')
+    grad_norm: metrics.Average.from_output('grad_norm')
 
 
 class TrainState(train_state.TrainState):
@@ -111,8 +114,8 @@ class TrainingRun:
     @ft.partial(jax.jit, static_argnames=('task', 'config'))
     @chex.assert_max_traces(3)
     def compute_metrics(*, task: str, config: LossConfig, state: TrainState, batch: DataBatch, rng):
-        preds = state.apply_fn(state.params, batch, training=False, rngs=rng).squeeze()
         if task == 'e_form':
+            preds = state.apply_fn(state.params, batch, training=False, rngs=rng).squeeze()
             loss = config.regression_loss(preds, batch.e_form)
             mae = jnp.abs(preds - batch.e_form).mean()
             rmse = jnp.sqrt(optax.losses.squared_error(preds, batch.e_form).mean())
@@ -120,10 +123,10 @@ class TrainingRun:
                 mae=mae, loss=loss, rmse=rmse, grad_norm=state.last_grad_norm
             )
         elif task == 'diled':
-            loss = preds
-
+            _loss, losses = state.apply_fn(state.params, batch, training=False, rngs=rng)
+            losses = {k: jnp.mean(v) for k, v in losses.items()}
             metric_updates = state.metrics.single_from_model_output(
-                loss=loss, grad_norm=state.last_grad_norm
+                grad_norm=state.last_grad_norm, **losses
             )
         else:
             msg = f'Unknown task {task}'
@@ -144,15 +147,15 @@ class TrainingRun:
             rngs['dropout'], rngs['noise'], rngs['time'] = jax.random.split(rngs['dropout'], 3)
 
         def loss_fn(params):
-            preds = state.apply_fn(params, batch, training=True, rngs=rngs).squeeze()
-
             if task == 'e_form':
-                return config.regression_loss(preds, batch.e_form)
+                preds = state.apply_fn(params, batch, training=True, rngs=rngs).squeeze()
+                return (config.regression_loss(preds, batch.e_form), {})
             else:
-                return jnp.mean(preds)
+                loss, losses = state.apply_fn(params, batch, training=True, rngs=rngs)
+                return loss.mean(), losses
 
-        grad_fn = jax.grad(loss_fn)
-        grads = grad_fn(state.params)
+        grad_fn = jax.grad(loss_fn, has_aux=True)
+        grads, losses = grad_fn(state.params)
         grad_norm = optax.global_norm(grads)
         state = state.apply_gradients(grads=grads, last_grad_norm=grad_norm)
         return state
@@ -226,7 +229,7 @@ class TrainingRun:
                     config=self.config.train.loss,
                     state=self.test_state,
                     batch=test_batch,
-                    rng=self.rng
+                    rng=self.rng,
                 )
 
             for metric, value in self.test_state.metrics.compute().items():

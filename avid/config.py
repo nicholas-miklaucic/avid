@@ -83,7 +83,7 @@ class DataConfig:
 
     # Data augmentations
     # If False, disables all augmentations.
-    do_augment: bool = True
+    do_augment: bool = False
     # Random seed for augmentations.
     augment_seed: int = 12345
     # Whether to apply SO(3) augmentations: proper rotations
@@ -517,6 +517,7 @@ class DiLEDConfig:
     patch_conv_sizes: list[int] = field(default_factory=lambda: [7])
     patch_conv_strides: list[int] = field(default_factory=lambda: [3])
     patch_conv_features: list[int] = field(default_factory=lambda: [384])
+    use_dec_conv: bool = False
     species_embed_dim: int = 128
     backbone: DiTConfig = field(default_factory=DiTConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
@@ -531,6 +532,7 @@ class DiLEDConfig:
             patch_conv_sizes=self.patch_conv_sizes,
             species_embed_dim=self.species_embed_dim,
             n_species=len(ELEM_VALS),
+            use_dec_conv=self.use_dec_conv,
         )
 
         category = self.category.build()

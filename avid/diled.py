@@ -142,6 +142,7 @@ class GConv(nn.Module):
             padding='CIRCULAR',
             dtype=jnp.bfloat16,
             strides=[self.stride, self.stride, self.stride],
+            transpose_kernel=True,
         )
 
     def __call__(self, x):
@@ -163,6 +164,7 @@ class EncoderDecoder(nn.Module):
     patch_conv_sizes: Sequence[int]
     patch_conv_strides: Sequence[int]
     patch_conv_features: Sequence[int]
+    use_dec_conv: bool
     species_embed_dim: int
     n_species: int
 
@@ -178,22 +180,31 @@ class EncoderDecoder(nn.Module):
         ):
             kwargs = dict(conv_size=size, in_features=prev_feats, out_features=feats, stride=stride)
             for convs, transpose in zip((enc_convs, dec_convs), (False, True)):
+                if transpose and not self.use_dec_conv:
+                    continue
                 block = [
                     GConv(transpose=transpose, **kwargs),
                     nn.LayerNorm(dtype=jnp.bfloat16),
-                    nn.gelu,
                 ]
                 convs.append(nn.Sequential(block))
             prev_feats = feats
 
         self.encoder_conv = nn.Sequential(enc_convs)
-        self.decoder_conv = nn.Sequential(dec_convs[::-1])
+        if self.use_dec_conv:
+            self.decoder_conv = nn.Sequential(dec_convs[::-1])
 
         self.patch_proj = nn.DenseGeneral(
             features=self.patch_latent_dim, axis=-1, dtype=jnp.bfloat16
         )
 
-        self.dec_patch_proj = nn.DenseGeneral(features=feats, axis=-1, dtype=jnp.bfloat16)
+        if self.use_dec_conv:
+            self.dec_patch_proj = nn.DenseGeneral(features=feats, axis=-1, dtype=jnp.bfloat16)
+        else:
+            self.dec_patch_proj = nn.DenseGeneral(
+                features=np.prod(self.patch_conv_strides) ** 3 * self.species_embed_dim,
+                axis=-1,
+                dtype=jnp.bfloat16,
+            )
 
     def encode(self, data: DataBatch, training: bool):
         spec_emb = self.spec_emb(data)
@@ -203,7 +214,13 @@ class EncoderDecoder(nn.Module):
 
     def patch_decode(self, patches, training: bool):
         dec = self.dec_patch_proj(patches)
-        spec_emb = self.decoder_conv(dec)
+        if self.use_dec_conv:
+            spec_emb = self.decoder_conv(dec)
+        else:
+            spec_emb = EinsOp(
+                'b i i i (p p p d) -> b (i p) (i p) (i p) d',
+                symbol_values={'d': self.species_embed_dim},
+            )(dec)
         return (spec_emb, dec)
 
 
@@ -249,13 +266,24 @@ class DiLED(nn.Module):
     @nn.compact
     def __call__(self, data: DataBatch, training: bool):
         """Runs a training step, returning loss. Uses time, noise RNG keys."""
-        beta_0 = 1e-4
         x_0, conv, patch = self.encoder_decoder.encode(data, training=training)
         enc = patch
+        beta_0 = 1e-1
         eps_0 = jax.random.normal(self.make_rng('noise'), shape=enc.shape)
         x_1 = enc + beta_0 * eps_0
 
-        rec_x_0, dec_conv = self.encoder_decoder.patch_decode(enc, training=training)
+        rec_x_0, dec_conv = self.encoder_decoder.patch_decode(x_1, training=training)
+
+        def voxel_loss(x1, x2):
+            return jnp.sqrt(jnp.mean(jnp.square(x1 - x2)))
+
+        def l_rec():
+            rec_loss = voxel_loss(x_0.astype(jnp.float32), rec_x_0.astype(jnp.float32))
+            return rec_loss
+
+        if self.w == 0:
+            loss = l_rec()
+            return (loss, {'loss': loss, 'rec_loss': loss, 'other_loss': 0})
 
         t = jax.random.randint(
             self.make_rng('time'), [1], minval=1, maxval=self.diffusion.schedule.max_t
@@ -269,36 +297,26 @@ class DiLED(nn.Module):
         )
         eps = jax.random.normal(self.make_rng('noise'), shape=x_1.shape)
 
-        rec_loss = EinsOp(
-            'batch n1 n2 n3 d, batch n1 n2 n3 d -> batch n1 n2 n3', combine='add', reduce='l2_norm'
-        )
-        rec_reduce = EinsOp('batch n1 n2 n3 -> batch', reduce='mean')
-
-        patch_loss = EinsOp(
-            'batch n1 n2 n3 d, batch n1 n2 n3 d -> batch n1 n2 n3', combine='add', reduce='l2_norm'
-        )
-
-        patch_reduce = EinsOp('batch n1 n2 n3 -> batch', reduce='mean')
-
-        l_rec = (
-            rec_reduce(rec_loss(x_0.astype(jnp.float32), rec_x_0.astype(jnp.float32)))
-            / self.diffusion.schedule.max_t
-        )
-
         def l_align(self, eps):
             x_2 = self.diffusion.q_sample(x_1, t + 1, eps)
             mu_2_1 = self.diffusion.mu_eps_sigma(
                 DiffusionInput(x_t=x_2, t=t, y=y_mask), training=training
             )
-            loss = patch_loss(patch.astype(jnp.float32), -mu_2_1['mu'].astype(jnp.float32))
-            return patch_reduce(loss)
+            loss = voxel_loss(patch.astype(jnp.float32), mu_2_1['mu'].astype(jnp.float32))
+            return loss
 
         def l_diffusion(self, eps):
             x_t = self.diffusion.q_sample(x_1, t, eps)
             mu_eps = self.diffusion.mu_eps_sigma(
                 DiffusionInput(x_t=x_t, t=t, y=y_mask), training=training
             )
-            loss = patch_loss(mu_eps['eps'].astype(jnp.float32), -eps.astype(jnp.float32))
-            return patch_reduce(loss)
+            return voxel_loss(mu_eps['eps'].astype(jnp.float32), eps.astype(jnp.float32))
 
-        return l_rec + self.w * nn.cond((t == 1).all(), l_align, l_diffusion, self, eps)
+        rec_loss = l_rec() / self.diffusion.schedule.max_t
+        other_loss = self.w * nn.cond((t == 1).all(), l_align, l_diffusion, self, eps)
+        loss = {
+            'loss': rec_loss + other_loss,
+            'rec_loss': rec_loss,
+            'other_loss': other_loss,
+        }
+        return (loss['loss'], loss)

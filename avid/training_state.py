@@ -36,7 +36,8 @@ class RegressionMetrics(metrics.Collection):
 class DiffusionMetrics(metrics.Collection):
     loss: metrics.Average.from_output('loss')
     rec_loss: metrics.Average.from_output('rec_loss')
-    other_loss: metrics.Average.from_output('other_loss')
+    align_loss: metrics.Average.from_output('align_loss')
+    diffuser_loss: metrics.Average.from_output('diffuser_loss')
     grad_norm: metrics.Average.from_output('grad_norm')
 
 

@@ -200,11 +200,11 @@ class EncoderDecoder(nn.Module):
         if self.use_dec_conv:
             self.dec_patch_proj = nn.DenseGeneral(features=feats, axis=-1, dtype=jnp.bfloat16)
         else:
-            self.dec_patch_proj = nn.DenseGeneral(
+            self.dec_patch_proj = nn.Sequential([nn.DenseGeneral(
                 features=np.prod(self.patch_conv_strides) ** 3 * self.species_embed_dim,
                 axis=-1,
                 dtype=jnp.bfloat16,
-            )
+            ), nn.sigmoid])
 
     def encode(self, data: DataBatch, training: bool):
         spec_emb = self.spec_emb(data)
@@ -268,7 +268,7 @@ class DiLED(nn.Module):
         """Runs a training step, returning loss. Uses time, noise RNG keys."""
         x_0, conv, patch = self.encoder_decoder.encode(data, training=training)
         enc = patch
-        beta_0 = 1e-1
+        beta_0 = 1e-3
         eps_0 = jax.random.normal(self.make_rng('noise'), shape=enc.shape)
         x_1 = enc + beta_0 * eps_0
 
@@ -279,11 +279,12 @@ class DiLED(nn.Module):
 
         def l_rec():
             rec_loss = voxel_loss(x_0.astype(jnp.float32), rec_x_0.astype(jnp.float32))
-            return rec_loss
+            loss = rec_loss + 0.01 * voxel_loss(jnp.zeros_like(x_0), rec_x_0)
+            return loss * 1000
 
         if self.w == 0:
             loss = l_rec()
-            return (loss, {'loss': loss, 'rec_loss': loss, 'other_loss': 0})
+            return (loss, {'loss': loss, 'rec_loss': loss, 'diffuser_loss': 0, 'align_loss': 0})
 
         t = jax.random.randint(
             self.make_rng('time'), [1], minval=1, maxval=self.diffusion.schedule.max_t
@@ -297,26 +298,28 @@ class DiLED(nn.Module):
         )
         eps = jax.random.normal(self.make_rng('noise'), shape=x_1.shape)
 
-        def l_align(self, eps):
-            x_2 = self.diffusion.q_sample(x_1, t + 1, eps)
+        def l_align(eps):
+            x_2 = self.diffusion.q_sample(x_1, 2, eps)
             mu_2_1 = self.diffusion.mu_eps_sigma(
-                DiffusionInput(x_t=x_2, t=t, y=y_mask), training=training
+                DiffusionInput(x_t=x_2, t=1, y=y_mask), training=training
             )
             loss = voxel_loss(patch.astype(jnp.float32), mu_2_1['mu'].astype(jnp.float32))
-            return loss
+            return loss * 1000
 
-        def l_diffusion(self, eps):
-            x_t = self.diffusion.q_sample(x_1, t, eps)
+        def l_diffusion(eps):
+            x_t = self.diffusion.q_sample(enc, t, eps)
             mu_eps = self.diffusion.mu_eps_sigma(
                 DiffusionInput(x_t=x_t, t=t, y=y_mask), training=training
             )
             return voxel_loss(mu_eps['eps'].astype(jnp.float32), eps.astype(jnp.float32))
 
         rec_loss = l_rec() / self.diffusion.schedule.max_t
-        other_loss = self.w * nn.cond((t == 1).all(), l_align, l_diffusion, self, eps)
+        align_loss = l_align(eps) / self.diffusion.schedule.max_t
+        diffuser_loss = self.w * l_diffusion(eps)
         loss = {
-            'loss': rec_loss + other_loss,
+            'loss': rec_loss + align_loss + diffuser_loss,
             'rec_loss': rec_loss,
-            'other_loss': other_loss,
+            'align_loss': align_loss,
+            'diffuser_loss': diffuser_loss,
         }
         return (loss['loss'], loss)

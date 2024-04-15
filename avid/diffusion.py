@@ -87,8 +87,8 @@ class DiffusionNoiseSchedule(metaclass=abc.ABCMeta):
 
     def alpha_beta(self, times):
         """Gets α_t and β_t schedule, for times with T = max_t."""
-        alpha = self.alpha(times / self.max_t)
-        return {'alpha': alpha, 'beta': 1 - (alpha / self.alpha((times - 1) / self.max_t))}
+        alpha = self.alpha(times)
+        return {'alpha': alpha, 'beta': 1 - (alpha / self.alpha(times - 1))}
 
     def add_noise(self, x, t, noise):
         alpha = self.alpha(t / self.max_t)
@@ -166,7 +166,7 @@ class DiffusionModel(nn.Module):
             next_state = DiffusionInput(x_tm1, state.t - 1, state.y)
             return (next_state, next_rng)
 
-        last_state, last_rng = jax.lax.fori_loop(0, data.t, step, (data, rng))
+        last_state, last_rng = jax.lax.fori_loop(0, data.t - 1, step, (data, rng))
         return last_state
 
 

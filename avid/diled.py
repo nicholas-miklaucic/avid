@@ -69,20 +69,21 @@ class OrthoSpeciesEmbed(nn.Module):
     embed_dim: int
 
     def setup(self):
-        self.v = self.param(
-            'normal_vec',
-            nn.initializers.truncated_normal(stddev=1.0, dtype=jnp.float32, lower=-3, upper=3),
-            (max(self.n_species, self.embed_dim),),
+        self.mat = jnp.eye(self.embed_dim, self.n_species)
+        self.ii, self.jj = jnp.tril_indices_from(self.mat, k=-1)
+        self.vs = self.param(
+            'embed_raw',
+            nn.initializers.truncated_normal(stddev=0.2, dtype=jnp.float32, lower=-2, upper=2),
+            (self.n_species, self.embed_dim),
         )
 
     def species_embed_matrix(self):
         """Generates species embedding matrix of orthogonal vectors: (n_species, embed_dim)."""
-        vvt = jnp.outer(self.v, self.v)
-        vtv = jnp.dot(self.v, self.v)
-        eps = 1e-6
-        # householder matrix
-        mat = jnp.eye(self.v.size) - (2 / jnp.maximum(vtv, eps)) * vvt
-        return mat[: self.n_species, : self.embed_dim]
+        vvt = EinsOp('m n1, m n2 -> m n1 n2')(self.vs, self.vs)
+        vtv = EinsOp('m n, m n -> m 1 1')(self.vs, self.vs)
+        mats = jnp.eye(self.embed_dim, self.embed_dim) - 2 / vtv * vvt
+        orth = jnp.linalg.multi_dot(mats)
+        return orth[: self.n_species]
 
     def __call__(self, data: DataBatch):
         """Embeds the batch as a 3D image, shape batch n n n embed_dim."""

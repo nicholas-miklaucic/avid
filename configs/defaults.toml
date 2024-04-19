@@ -1,4 +1,4 @@
-batch_size = 52
+batch_size = 64
 do_profile = false
 num_epochs = 100
 regressor = "vit"
@@ -12,18 +12,23 @@ eff_scale = 0.7
 num_cells = 4
 
 [data]
-data_batch_size = 52
+dataset_name = "jarvis_dft3d_cleaned"
 raw_data_folder = "data"
 data_folder = "precomputed"
 shuffle_seed = 1618
-train_split = 8
-test_split = 3
-valid_split = 3
-do_augment = true
+train_split = 21
+test_split = 2
+valid_split = 2
+do_augment = false
 augment_seed = 12345
 so3 = true
 o3 = true
 t3 = true
+
+[data_transform]
+density_transform_name = "logit"
+density_scale = 0.25
+density_shift = 1
 
 [cli]
 verbosity = "info"
@@ -58,6 +63,7 @@ patch_latent_dim = 384
 patch_conv_sizes = [ 7,]
 patch_conv_strides = [ 3,]
 patch_conv_features = [ 384,]
+use_dec_conv = false
 species_embed_dim = 128
 w = 1
 
@@ -80,6 +86,7 @@ num_layers = 2
 num_heads = 4
 enc_dropout_rate = 0.1
 enc_attention_dropout_rate = 0.0
+equivariant = false
 
 [vit.head]
 inner_dims = []
@@ -100,7 +107,6 @@ condition_mlp_dims = [ 128,]
 time_dim = 64
 label_dim = 64
 condition_dropout = 0.0
-hidden_dim = 384
 
 [diled.diffusion]
 schedule_a = 1.7
@@ -167,6 +173,7 @@ num_layers = 2
 num_heads = 4
 enc_dropout_rate = 0.1
 enc_attention_dropout_rate = 0.0
+equivariant = false
 
 [mlp.token_mixer.activation]
 name = "gelu"

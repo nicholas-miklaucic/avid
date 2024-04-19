@@ -14,6 +14,7 @@ from flax import linen as nn
 
 from avid.databatch import DataBatch
 from avid.diffusion import DiffusionInput, DiffusionModel
+from avid.layers import LazyInMLP
 
 # class O3ImageEmbed(nn.Module):
 #     """Embeds a 3D image into a sequnce of tokens."""
@@ -64,7 +65,25 @@ def conv_basis(conv_size: int) -> np.ndarray:
     return conv_basis
 
 
-class OrthoSpeciesEmbed(nn.Module):
+class SpeciesTwoWayEmbed(nn.Module):
+    """Embedding module that supports recovering densities."""
+    n_species: int
+    embed_dim: int
+
+    def species_embed_matrix(self):
+        """Generates species embedding matrix of orthogonal vectors: (n_species, embed_dim)."""
+        pass
+
+    def __call__(self, data: DataBatch):
+        """Embeds the batch as a 3D image, shape batch n n n embed_dim."""
+        pass
+
+    def decode(self, im, data: DataBatch):
+        """Projects inputs to obtain the original densities."""
+        pass
+
+class OrthoSpeciesEmbed(SpeciesTwoWayEmbed):
+    """Embedding module that supports recovering densities. Uses orthogonal embeddings."""
     n_species: int
     embed_dim: int
 
@@ -96,12 +115,48 @@ class OrthoSpeciesEmbed(nn.Module):
             'batch n1 n2 n3 max_spec, batch max_spec n_spec, n_spec emb -> batch n1 n2 n3 emb',
         )
 
-    def decode(self, im):
+    def decode(self, im, data: DataBatch):
         """Projects inputs to obtain the original densities."""
         proj = EinsOp('batch n n n emb, n_spec emb -> batch n n n n_spec')(
             im, self.species_embed_matrix()
         )
         return proj
+    
+class LossySpeciesEmbed(SpeciesTwoWayEmbed):
+    """Embedding module that supports recovering densities."""
+    n_species: int
+    embed_dim: int
+
+    def setup(self):
+        self.emb = nn.Embed(self.n_species, self.embed_dim, dtype=jnp.bfloat16)
+        self.decoder = LazyInMLP(
+            inner_dims=[64],
+            out_dim=self.n_species,
+            name='species_decoder',
+            inner_act=nn.gelu,            
+        )
+
+    def species_embed_matrix(self):
+        """Generates species embedding matrix of orthogonal vectors: (n_species, embed_dim)."""
+        return self.emb.embedding
+
+    def __call__(self, data: DataBatch):
+        """Embeds the batch as a 3D image, shape batch n n n embed_dim."""
+        spec = jax.nn.one_hot(data.species, self.n_species, dtype=jnp.bfloat16)
+        # debug_structure(spec=spec, mat=self.species_embed_matrix())
+        embs = self.emb(data.species) * data.mask[..., None]        
+        return einops.einsum(
+            data.density,
+            embs,
+            'batch n1 n2 n3 max_spec, batch max_spec emb -> batch n1 n2 n3 emb',
+        )
+
+    def decode(self, im, data: DataBatch):
+        """Projects inputs to obtain the original densities."""
+
+        out = self.decoder(im, training=True)
+        out = jnp.take_along_axis(out, data.species[:, None, None, None, :], axis=-1)
+        return out
 
 
 class GConv(nn.Module):
@@ -169,7 +224,7 @@ class EncoderDecoder(nn.Module):
     n_species: int
 
     def setup(self):
-        self.spec_emb = OrthoSpeciesEmbed(
+        self.spec_emb = LossySpeciesEmbed(
             n_species=self.n_species, embed_dim=self.species_embed_dim
         )
         prev_feats = self.species_embed_dim
@@ -200,11 +255,11 @@ class EncoderDecoder(nn.Module):
         if self.use_dec_conv:
             self.dec_patch_proj = nn.DenseGeneral(features=feats, axis=-1, dtype=jnp.bfloat16)
         else:
-            self.dec_patch_proj = nn.Sequential([nn.DenseGeneral(
+            self.dec_patch_proj = nn.DenseGeneral(
                 features=np.prod(self.patch_conv_strides) ** 3 * self.species_embed_dim,
                 axis=-1,
                 dtype=jnp.bfloat16,
-            ), nn.sigmoid])
+            )
 
     def encode(self, data: DataBatch, training: bool):
         spec_emb = self.spec_emb(data)
@@ -212,7 +267,7 @@ class EncoderDecoder(nn.Module):
         patches = self.patch_proj(enc)
         return (spec_emb, enc, patches)
 
-    def patch_decode(self, patches, training: bool):
+    def patch_decode(self, patches, data: DataBatch, training: bool):
         dec = self.dec_patch_proj(patches)
         if self.use_dec_conv:
             spec_emb = self.decoder_conv(dec)
@@ -221,7 +276,9 @@ class EncoderDecoder(nn.Module):
                 'b i i i (p p p d) -> b (i p) (i p) (i p) d',
                 symbol_values={'d': self.species_embed_dim},
             )(dec)
-        return (spec_emb, dec)
+
+        dens = self.spec_emb.decode(spec_emb, data)
+        return (dens, spec_emb, dec)
 
 
 class Category:
@@ -252,6 +309,24 @@ class EFormCategory(Category):
     @property
     def num_categories(self) -> int:
         return self.num_cats
+    
+
+@dataclass
+class SpaceGroupCategory(Category):
+    just_cubic: bool = True
+
+    def __call__(self, data: DataBatch):
+        if self.just_cubic:
+            return data.space_group - 195
+        else:
+            return data.space_group - 1
+    
+    @property
+    def num_categories(self) -> int:
+        if self.just_cubic:
+            return 230
+        else:
+            return 230 - 194
 
 
 class DiLED(nn.Module):
@@ -272,14 +347,15 @@ class DiLED(nn.Module):
         eps_0 = jax.random.normal(self.make_rng('noise'), shape=enc.shape)
         x_1 = enc + beta_0 * eps_0
 
-        rec_x_0, dec_conv = self.encoder_decoder.patch_decode(x_1, training=training)
+        dens, rec_x_0, dec_conv = self.encoder_decoder.patch_decode(x_1, data, training=training)
 
         def voxel_loss(x1, x2):
             return jnp.sqrt(jnp.mean(jnp.square(x1 - x2)))
 
         def l_rec():
-            rec_loss = voxel_loss(x_0.astype(jnp.float32), rec_x_0.astype(jnp.float32))
-            loss = rec_loss + 0.01 * voxel_loss(jnp.zeros_like(x_0), rec_x_0)
+            dens_aligned = jnp.take_along_axis(dens, data.species[:, None, None, None, :], axis=-1)
+            rec_loss = voxel_loss(dens_aligned, data.density)
+            loss = rec_loss + 0.01 * voxel_loss(jnp.zeros_like(patch), patch)
             return loss * 1000
 
         if self.w == 0:

@@ -142,7 +142,7 @@ class DiffusionModel(nn.Module):
         eps = out['eps']
         sigma = out['sigma']
         sched = self.schedule.alpha_beta(data.t)
-        pred_images = 1 / jnp.sqrt(sched['alpha']) * (data.x_t - jnp.sqrt(1 - sched['alpha']) * eps)
+        pred_images = 1 / jnp.sqrt(1 - sched['beta']) * (data.x_t - jnp.sqrt(1 - sched['alpha']) * eps)
         return {'mu': pred_images, 'eps': eps, 'sigma': sigma}
 
     def q_sample(self, x_t, t, noise):

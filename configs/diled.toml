@@ -1,24 +1,24 @@
-batch_size = 52
+batch_size = 64
 do_profile = false
-num_epochs = 100
+num_epochs = 50
 regressor = "vit"
 task = "diled"
 
 [voxelizer]
-max_unique_species = 5
+max_unique_species = 4
 n_grid = 24
-distance_power = 2.0
+distance_power = 2.4
 eff_scale = 0.7
 num_cells = 4
 
 [data]
-data_batch_size = 52
+dataset_name = "jarvis_dft3d_cleaned"
 raw_data_folder = "data"
 data_folder = "precomputed"
 shuffle_seed = 1618
-train_split = 8
-test_split = 3
-valid_split = 3
+train_split = 21
+test_split = 2
+valid_split = 2
 do_augment = false
 augment_seed = 12345
 so3 = true
@@ -43,7 +43,7 @@ lr_schedule_kind = "cosine"
 start_lr_frac = 0.1
 base_lr = 0.001
 end_lr_frac = 0.01
-weight_decay = 0.003
+weight_decay = 0
 beta_1 = 0.9
 beta_2 = 0.999
 nestorov = true
@@ -55,7 +55,7 @@ patch_conv_sizes = [7]
 patch_conv_strides = [3]
 patch_conv_features = [64]
 species_embed_dim = 128
-w = 3
+w = 1
 
 [diled.backbone]
 condition_mlp_dims = [64]
@@ -70,8 +70,7 @@ timesteps = 100
 class_dropout = 0.25
 
 [diled.category]
-category_loss_type = "e_form"
-num_cats = 8
+category_loss_type = "cubic_space_group"
 
 [diled.backbone.time_mlp]
 inner_dims = []

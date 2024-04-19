@@ -1,78 +1,44 @@
 """Code to load the processed data."""
 
 from functools import partial
+from os import PathLike
+from pathlib import Path
 from typing import Literal
 from warnings import filterwarnings
 
-import equinox as eqx
+from flax.serialization import msgpack_restore
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pyrallis
 from beartype.roar import BeartypeDecorHintPep585DeprecationWarning
 from einops import rearrange
+from eins import EinsOp
 
 from avid.augmentations import randomly_augment
 from avid.config import MainConfig
 from avid.databatch import DataBatch
 from avid.metadata import Metadata
-from avid.utils import ELEM_VALS, debug_structure
+from avid.utils import debug_structure, load_pytree
 
-n_elems = len(ELEM_VALS)
 filterwarnings('ignore', category=BeartypeDecorHintPep585DeprecationWarning)
 
 
-def load_file(config: MainConfig, file_num=0):
+def load_file(config: MainConfig, file_num=0) -> DataBatch:
     """Loads a file. Lacks the complex data loader logic, but easier to use for testing."""
-    data_folder = config.data.data_folder
-    fn = data_folder / 'densities' / f'batch{file_num}.eqx'
-    num_files = len(list(data_folder.glob('densities/*.eqx')))
+    data_folder = config.data.dataset_folder
+    fn = data_folder / 'densities' / f'batch{file_num}.mpk'
 
-    data_templ = {
-        'density': jnp.empty(
-            (config.data.data_batch_size, config.voxelizer.n_points, n_elems),
-            dtype=jnp.float32,
-        ),
-    }
+    data = load_pytree(fn)
 
-    metadata: Metadata = eqx.tree_deserialise_leaves(
-        data_folder / 'metadata.eqx', Metadata.new_empty(num_files, config.data.data_batch_size)
-    )
+    dens_transform = jax.jit(lambda x: config.data_transform.density_transform()(x))
 
-    # data = [eqx.tree_deserialise_leaves(file, data_templ) for file in files]
+    data['density'] = jnp.where(data['density'] == 0, jnp.nan, dens_transform(data['density']))
 
-    raw_data = eqx.tree_deserialise_leaves(fn, data_templ)
-    data = {}
-    _dens, data['species'] = jax.lax.top_k(
-        raw_data['density'].max(axis=1), config.voxelizer.max_unique_species
-    )
-    data['density'] = jnp.permute_dims(
-        jnp.take_along_axis(
-            jnp.permute_dims(raw_data['density'], [0, 2, 1]), data['species'][..., None], axis=1
-        ),
-        [0, 2, 1],
-    )
-    data['species'] = data['species'].squeeze()
+    for k, v in data.items():
+        if v.dtype == jnp.float32:
+            data[k] = v.astype(jnp.bfloat16)
 
-    assert (
-        jnp.max(
-            jnp.abs(
-                jnp.sum(data['density'], axis=(1, 2)) - jnp.sum(raw_data['density'], axis=(1, 2))
-            )
-        )
-        < 1e-3
-    )
-
-    nx = ny = nz = config.voxelizer.n_grid
-    data['mask'] = jnp.max(jnp.abs(data['density']), axis=1) > 0
-    data['density'] = rearrange(
-        data['density'], 'bs (nx ny nz) nchan -> bs nx ny nz nchan', nx=nx, ny=ny, nz=nz
-    )
-    data['e_form'] = metadata.e_form[file_num]
-    data['lat_abc_angles'] = metadata.lat_abc_angles[file_num]
-
-    for k in ['density', 'e_form', 'lat_abc_angles']:
-        data[k] = data[k].astype(jnp.bfloat16)
     return DataBatch(**data)
 
 
@@ -80,8 +46,8 @@ def dataloader_base(
     config: MainConfig, split: Literal['train', 'test', 'valid'] = 'train', infinite: bool = False
 ):
     """Returns a generator that produces batches to train on. If infinite, repeats forever: otherwise, stops when all data has been yielded."""
-    data_folder = config.data.data_folder
-    files = sorted(list(data_folder.glob('densities/*.eqx')))
+    data_folder = config.data.dataset_folder
+    files = sorted(list(data_folder.glob('densities/batch*')))
 
     splits = np.cumsum([config.data.train_split, config.data.valid_split, config.data.test_split])
     total = splits[-1]
@@ -136,7 +102,7 @@ def dataloader_base(
 
             batch_data = split_files[batch]
             collated = jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
-            yield collated.device_put(device)
+            yield jax.device_put(collated, device)
 
     while infinite:
         batch_inds = np.split(
@@ -146,7 +112,7 @@ def dataloader_base(
         for batch in batch_inds:
             batch_data = [transform(split_files[i]) for i in batch]
             collated = jax.tree_map(lambda *args: jnp.concat(args, axis=0), *batch_data)
-            yield collated.device_put(device)
+            yield jax.device_put(collated, device)
 
 
 def dataloader(

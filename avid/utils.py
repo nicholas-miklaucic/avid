@@ -1,5 +1,7 @@
 """Utilities."""
 
+from os import PathLike
+from pathlib import Path
 import re
 from abc import ABCMeta
 from dataclasses import asdict, is_dataclass
@@ -16,6 +18,7 @@ from jaxtyping import jaxtyped
 from pymatgen.core import Element
 from rich.style import Style
 from rich.tree import Tree
+from flax.serialization import msgpack_restore, msgpack_serialize
 
 ELEM_VALS = 'Li Be B N O F Na Mg Al Si S K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Rb Sr Y Zr Nb Mo Ru Rh Pd Ag Cd In Sn Sb Te Cs Ba La Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi'.split(
     ' '
@@ -35,6 +38,18 @@ def elem_to_val(elem: str | Element) -> int:
         elem = elem.symbol
 
     return ELEM_VALS.index(elem)
+
+
+def load_pytree(file: PathLike):
+    """Loads a MsgPack serialized PyTree."""
+    with open(Path(file), 'rb') as infile:
+        return msgpack_restore(infile.read())
+    
+def save_pytree(obj, file: PathLike):
+    """Saves a MsgPack serialized PyTree."""
+    with open(Path(file), 'wb') as out:
+        out.write(msgpack_serialize(obj))        
+
 
 
 class AbstractTreeVisitor(metaclass=ABCMeta):

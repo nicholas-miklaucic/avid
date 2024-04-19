@@ -1,7 +1,8 @@
+from functools import cached_property
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import jax
 import jax.numpy as jnp
@@ -11,9 +12,11 @@ from flax import linen as nn
 from flax.struct import dataclass
 from pyrallis import field
 
+from eins.elementwise import ElementwiseOp
+from eins import ElementwiseOps as E
 from avid import layers
 from avid.diffusion import DiffusionBackbone, DiffusionModel, DiT, KumaraswamySchedule
-from avid.diled import DiLED, EFormCategory, EncoderDecoder
+from avid.diled import Category, DiLED, EFormCategory, EncoderDecoder, SpaceGroupCategory
 from avid.encoder import Downsample, ReduceSpeciesEmbed, SpeciesEmbed
 from avid.layers import EquivariantMixerMLP, Identity, LazyInMLP, MLPMixer
 from avid.mlp_mixer import MLPMixerRegressor, O3ImageEmbed
@@ -60,10 +63,9 @@ class VoxelizerConfig:
 
 
 @dataclass
-class DataConfig:
-    # The batch size for processing. The dataset size is 2^4 x 7 x 13^2, so 52 is a reasonable
-    # value that I've picked to make even batches.
-    data_batch_size: int = 52
+class DataConfig:    
+    # The name of the dataset to use.
+    dataset_name: str = 'jarvis_dft3d_cleaned'
 
     # Folder of raw data files.
     raw_data_folder: Path = Path('data/')
@@ -75,11 +77,11 @@ class DataConfig:
     shuffle_seed: int = 1618
 
     # Train split.
-    train_split: int = 8
+    train_split: int = 21
     # Test split.
-    test_split: int = 3
+    test_split: int = 2
     # Valid split.
-    valid_split: int = 3
+    valid_split: int = 2
 
     # Data augmentations
     # If False, disables all augmentations.
@@ -92,6 +94,45 @@ class DataConfig:
     o3: bool = True
     # Whether to apply T(3) augmentations: origin shifts.
     t3: bool = True
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        import json
+        with open(self.dataset_folder / 'metadata.json', 'r') as metadata:
+            metadata = json.load(metadata)
+        return metadata
+
+
+    def __post_init__(self):    
+        num_splits = self.train_split + self.test_split + self.valid_split
+        num_batches = self.metadata['data_size'] // self.metadata['batch_size']
+        if num_batches % num_splits != 0:
+            msg = f'Data is split {num_splits} ways, which does not divide {num_batches}'
+            raise ValueError(msg)
+        
+    @property
+    def dataset_folder(self) -> Path:
+        """Folder where dataset-specific files are stored."""
+        return self.data_folder / self.dataset_name
+    
+
+@dataclass
+class DataTransformConfig:
+    # Density transform: Eins elementwise string.
+    density_transform_name: str = 'logit'
+    # Density scale: returns density * scale + shift.
+    density_scale: float = 0.25
+    # Density shift
+    density_shift: float = 1
+    
+    def density_transform(self) -> ElementwiseOp:
+        if self.density_transform_name == 'logit':
+            func = jax.scipy.special.logit
+        else:
+            func = getattr(E, self.density_transform_name)
+
+        return E.from_func(lambda x: func(x) * self.density_scale + self.density_shift)
+    
 
 
 class LoggingLevel(Enum):
@@ -118,6 +159,10 @@ class CLIConfig:
 
         pretty_install(crop=True)
         traceback_install()
+
+        import flax.traceback_util as ftu
+
+        ftu.hide_flax_in_tracebacks()
 
         logging.basicConfig(
             level=self.verbosity.value,
@@ -337,10 +382,10 @@ class SpeciesEmbedConfig:
     # Whether to use the above MLP config or a simple weighted average.
     use_simple_weighting: bool = False
 
-    def build(self) -> ReduceSpeciesEmbed:
+    def build(self, data: DataConfig) -> ReduceSpeciesEmbed:
         return ReduceSpeciesEmbed(
             SpeciesEmbed(
-                len(ELEM_VALS),
+                len(data.metadata['elements']),
                 self.species_embed_dim,
                 self.spec_embed.build(),
                 self.use_simple_weighting,
@@ -395,7 +440,7 @@ class ViTRegressorConfig:
     equivariant: bool = False
     out_dim: int = 1
 
-    def build(self) -> ViTRegressor:
+    def build(self, data: DataConfig) -> ViTRegressor:
         if self.equivariant and self.vit_input.pos_embed_type != 'identity':
             msg = 'Need no positional embeddings for equivariant encoder'
             raise ValueError(msg)
@@ -403,7 +448,7 @@ class ViTRegressorConfig:
         head = self.head.build()
         head.out_dim = self.out_dim
         return ViTRegressor(
-            spec_embed=self.species_embed.build(),
+            spec_embed=self.species_embed.build(data),
             downsample=self.downsample.build(),
             head=head,
             encoder=self.encoder.build(),
@@ -432,11 +477,11 @@ class MLPMixerConfig:
     downsample: DownsampleConfig = field(default_factory=DownsampleConfig)
     out_dim: int = 1
 
-    def build(self) -> MLPMixerRegressor:
+    def build(self, data: DataConfig) -> MLPMixerRegressor:
         head = self.head.build()
         head.out_dim = self.out_dim
         return MLPMixerRegressor(
-            spec_embed=self.species_embed.build(),
+            spec_embed=self.species_embed.build(data),
             downsample=self.downsample.build(),
             head=head,
             mixer=MLPMixer(
@@ -498,15 +543,22 @@ class DiffusionConfig:
 
 @dataclass
 class DiffusionCategoryConfig:
-    # Category loss type.
-    category_loss_type: str = 'e_form'
+    # Category loss type. 'e_form', 'bandgap', 'space_group', 'cubic_space_group'
+    category_loss_type: str = 'cubic_space_group'
 
-    # Number of categories.
-    num_cats: int = 8
+    # Number of categories, for continuous targets.
+    num_bins: int = 8
 
-    def build(self):
+    def build(self, data: DataConfig) -> Category:
         if self.category_loss_type == 'e_form':
-            return EFormCategory(num_cats=self.num_cats)
+            return EFormCategory(num_cats=self.num_bins)
+        elif self.category_loss_type == 'bandgap':
+            pass
+        elif self.category_loss_type == 'space_group':
+            return SpaceGroupCategory(just_cubic=False)
+        elif self.category_loss_type == 'cubic_space_group':
+            return SpaceGroupCategory(just_cubic=True)
+
 
 
 @dataclass
@@ -524,7 +576,7 @@ class DiLEDConfig:
     category: DiffusionCategoryConfig = field(default_factory=DiffusionCategoryConfig)
     w: float = 1
 
-    def build(self) -> DiLED:
+    def build(self, data: DataConfig) -> DiLED:
         enc_dec = EncoderDecoder(
             patch_latent_dim=self.patch_latent_dim,
             patch_conv_strides=self.patch_conv_strides,
@@ -535,7 +587,7 @@ class DiLEDConfig:
             use_dec_conv=self.use_dec_conv,
         )
 
-        category = self.category.build()
+        category = self.category.build(data)
 
         dit = self.backbone.build(
             num_classes=category.num_categories, hidden_dim=self.patch_latent_dim
@@ -543,7 +595,7 @@ class DiLEDConfig:
         return DiLED(
             encoder_decoder=enc_dec,
             diffusion=self.diffusion.build(dit),
-            category=self.category.build(),
+            category=self.category.build(data),
             class_dropout=self.diffusion.class_dropout,
             w=self.w,
         )
@@ -643,7 +695,7 @@ class TrainingConfig:
 @dataclass
 class MainConfig:
     # The batch size. Should be a multiple of data_batch_size to make data loading simple.
-    batch_size: int = 52 * 1
+    batch_size: int = 32 * 2
 
     # Use profiling.
     do_profile: bool = False
@@ -659,6 +711,7 @@ class MainConfig:
 
     voxelizer: VoxelizerConfig = field(default_factory=VoxelizerConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    data_transform: DataTransformConfig = field(default_factory=DataTransformConfig)
     cli: CLIConfig = field(default_factory=CLIConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
     log: LogConfig = field(default_factory=LogConfig)
@@ -673,10 +726,10 @@ class MainConfig:
     task: str = 'e_form'
 
     def __post_init__(self):
-        if self.batch_size % self.data.data_batch_size != 0:
+        if self.batch_size % self.data.metadata['batch_size'] != 0:
             raise ValueError(
                 'Training batch size should be multiple of data batch size: {} does not divide {}'.format(
-                    self.batch_size, self.data.data_batch_size
+                    self.batch_size, self.data.metadata['batch_size']
                 )
             )
 
@@ -694,7 +747,7 @@ class MainConfig:
     @property
     def train_batch_multiple(self) -> int:
         """How many files should be loaded per training step."""
-        return self.batch_size // self.data.data_batch_size
+        return self.batch_size // self.data.metadata['batch_size']
 
     def build_vit(self) -> ViTRegressor:
         return self.vit.build()
@@ -718,7 +771,7 @@ class MainConfig:
             return self.build_mlp()
 
     def build_diled(self):
-        return self.diled.build()
+        return self.diled.build(self.data)
 
 
 if __name__ == '__main__':

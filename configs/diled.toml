@@ -16,15 +16,16 @@ dataset_name = "jarvis_dft3d_cleaned"
 raw_data_folder = "data"
 data_folder = "precomputed"
 shuffle_seed = 1618
-train_split = 4
+train_split = 20
 test_split = 1
-valid_split = 20
+valid_split = 4
 do_augment = false
 
 [data_transform]
-density_transform_name = "sqrt"
-density_scale = 2
+density_transform_name = "positive"
+density_scale = 1
 density_shift = 0
+eps = 0
 
 [cli]
 verbosity = "info"
@@ -62,7 +63,7 @@ timesteps = 100
 class_dropout = 0.25
 
 [diled.category]
-category_loss_type = "cubic_space_group"
+category_loss_type = "e_form"
 
 [diled.backbone.time_mlp]
 inner_dims = []

@@ -122,6 +122,7 @@ class TrainingRun:
         state = state.replace(metrics=metrics)
         return state
 
+
     @staticmethod
     @ft.partial(jax.jit, static_argnames=('task', 'config'))
     @chex.assert_max_traces(6)
@@ -178,12 +179,18 @@ class TrainingRun:
             batch=batch,
             rng=self.rng,
         )
+
+        metrics = self.state.metrics
+        self.state = self.state.replace(metrics={})
         self.state = self.train_step(state=self.state, **kwargs)
+        self.state = self.state.replace(metrics=metrics)
         self.state = self.compute_metrics(state=self.state, **kwargs)
 
         if self.should_log or self.should_ckpt:  # one training epoch has passed
             for metric, values in self.state.metrics.items():  # compute metrics
                 value = jnp.mean(jnp.array(values)).item()
+                if value != value:
+                    raise ValueError
                 if metric == 'grad_norm':
                     self.metrics_history['grad_norm'].append(value)  # record metrics
                     continue

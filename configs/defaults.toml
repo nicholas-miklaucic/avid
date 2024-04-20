@@ -29,6 +29,7 @@ t3 = true
 density_transform_name = "logit"
 density_scale = 0.25
 density_shift = 1
+eps = 1e-8
 
 [cli]
 verbosity = "info"
@@ -115,8 +116,13 @@ timesteps = 100
 class_dropout = 0.5
 
 [diled.category]
-category_loss_type = "e_form"
-num_cats = 8
+category_loss_type = "cubic_space_group"
+num_bins = 8
+
+[diled.head]
+inner_dims = []
+dropout = 0.1
+equivariant = false
 
 [mlp.token_mixer]
 inner_dims = []
@@ -174,6 +180,12 @@ num_heads = 4
 enc_dropout_rate = 0.1
 enc_attention_dropout_rate = 0.0
 equivariant = false
+
+[diled.head.activation]
+name = "relu"
+
+[diled.head.final_activation]
+name = "Identity"
 
 [mlp.token_mixer.activation]
 name = "gelu"

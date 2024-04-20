@@ -16,27 +16,19 @@ dataset_name = "jarvis_dft3d_cleaned"
 raw_data_folder = "data"
 data_folder = "precomputed"
 shuffle_seed = 1618
-train_split = 21
-test_split = 2
-valid_split = 2
+train_split = 4
+test_split = 1
+valid_split = 20
 do_augment = false
-augment_seed = 12345
-so3 = true
-o3 = true
-t3 = true
+
+[data_transform]
+density_transform_name = "sqrt"
+density_scale = 2
+density_shift = 0
 
 [cli]
 verbosity = "info"
 show_progress = true
-
-[device]
-device = "gpu"
-max_gpus = 1
-gpu_ids = []
-
-[log]
-log_dir = "logs"
-logs_per_epoch = 8
 
 [train]
 lr_schedule_kind = "cosine"
@@ -50,12 +42,12 @@ nestorov = true
 max_grad_norm = 3.0
 
 [diled]
-patch_latent_dim = 512
-patch_conv_sizes = [7]
+patch_latent_dim = 128
+patch_conv_sizes = [5]
 patch_conv_strides = [3]
 patch_conv_features = [64]
-species_embed_dim = 128
-w = 1
+species_embed_dim = 32
+w = 0
 
 [diled.backbone]
 condition_mlp_dims = [64]
@@ -79,10 +71,15 @@ equivariant = false
 
 [diled.backbone.encoder]
 equivariant = true
-num_layers = 4
+num_layers = 3
 num_heads = 16
 enc_dropout_rate = 0.1
 enc_attention_dropout_rate = 0.1
+
+[diled.head]
+inner_dims = [256]
+dropout = 0.1
+equivariant = false
 
 [diled.backbone.time_mlp.activation]
 name = "gelu"

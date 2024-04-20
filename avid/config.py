@@ -63,7 +63,7 @@ class VoxelizerConfig:
 
 
 @dataclass
-class DataConfig:    
+class DataConfig:
     # The name of the dataset to use.
     dataset_name: str = 'jarvis_dft3d_cleaned'
 
@@ -103,36 +103,38 @@ class DataConfig:
         return metadata
 
 
-    def __post_init__(self):    
+    def __post_init__(self):
         num_splits = self.train_split + self.test_split + self.valid_split
         num_batches = self.metadata['data_size'] // self.metadata['batch_size']
         if num_batches % num_splits != 0:
             msg = f'Data is split {num_splits} ways, which does not divide {num_batches}'
             raise ValueError(msg)
-        
+
     @property
     def dataset_folder(self) -> Path:
         """Folder where dataset-specific files are stored."""
         return self.data_folder / self.dataset_name
-    
+
 
 @dataclass
 class DataTransformConfig:
     # Density transform: Eins elementwise string.
-    density_transform_name: str = 'logit'
+    density_transform_name: str = 'log'
     # Density scale: returns density * scale + shift.
     density_scale: float = 0.25
     # Density shift
     density_shift: float = 1
-    
+    # Epsilon to avoid zeros:
+    eps: float = 1e-6
+
     def density_transform(self) -> ElementwiseOp:
         if self.density_transform_name == 'logit':
             func = jax.scipy.special.logit
         else:
             func = getattr(E, self.density_transform_name)
 
-        return E.from_func(lambda x: func(x) * self.density_scale + self.density_shift)
-    
+        return E.from_func(lambda x: func(x + self.eps) * self.density_scale + self.density_shift)
+
 
 
 class LoggingLevel(Enum):
@@ -157,7 +159,7 @@ class CLIConfig:
         from rich.pretty import install as pretty_install
         from rich.traceback import install as traceback_install
 
-        pretty_install(crop=True)
+        pretty_install(crop=True, max_string=100)
         traceback_install()
 
         import flax.traceback_util as ftu
@@ -170,7 +172,7 @@ class CLIConfig:
             datefmt='[%X]',
             handlers=[
                 RichHandler(
-                    rich_tracebacks=False,
+                    rich_tracebacks=True,
                     show_time=False,
                     show_level=False,
                     show_path=False,
@@ -574,6 +576,7 @@ class DiLEDConfig:
     backbone: DiTConfig = field(default_factory=DiTConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     category: DiffusionCategoryConfig = field(default_factory=DiffusionCategoryConfig)
+    head: MLPConfig = field(default_factory=MLPConfig)
     w: float = 1
 
     def build(self, data: DataConfig) -> DiLED:
@@ -583,7 +586,7 @@ class DiLEDConfig:
             patch_conv_features=self.patch_conv_features,
             patch_conv_sizes=self.patch_conv_sizes,
             species_embed_dim=self.species_embed_dim,
-            n_species=len(ELEM_VALS),
+            n_species=len(data.metadata['elements']),
             use_dec_conv=self.use_dec_conv,
         )
 
@@ -597,6 +600,8 @@ class DiLEDConfig:
             diffusion=self.diffusion.build(dit),
             category=self.category.build(data),
             class_dropout=self.diffusion.class_dropout,
+            encoder=dit.encoder.copy(),
+            head=self.head.build(),
             w=self.w,
         )
 
@@ -769,6 +774,8 @@ class MainConfig:
             return self.build_vit()
         elif self.regressor == 'mlp':
             return self.build_mlp()
+        else:
+            raise ValueError
 
     def build_diled(self):
         return self.diled.build(self.data)

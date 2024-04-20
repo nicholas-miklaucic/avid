@@ -29,15 +29,17 @@ def load_file(config: MainConfig, file_num=0) -> DataBatch:
     data_folder = config.data.dataset_folder
     fn = data_folder / 'densities' / f'batch{file_num}.mpk'
 
-    data = load_pytree(fn)
+    data: dict = load_pytree(fn) # type: ignore
 
-    dens_transform = jax.jit(lambda x: config.data_transform.density_transform()(x))
+    dens_transform = config.data_transform.density_transform()
 
-    data['density'] = jnp.where(data['density'] == 0, jnp.nan, dens_transform(data['density']))
+    data['density'] = dens_transform(data['density'])
 
     for k, v in data.items():
-        if v.dtype == jnp.float32:
-            data[k] = v.astype(jnp.bfloat16)
+        if v.dtype == np.float32:
+            data[k] = jnp.array(v, dtype=jnp.bfloat16)
+        else:
+            data[k] = jnp.array(v)
 
     return DataBatch(**data)
 
@@ -145,10 +147,15 @@ if __name__ == '__main__':
     steps_per_epoch, dl = dataloader(config, split='valid', infinite=True)
 
     means = []
+    e_forms = []
     for _i in tqdm(np.arange(steps_per_epoch * 2)):
         batch = next(dl)
         means.append(batch.density.mean())
+        e_forms.append(batch.e_form.mean())
 
-    print(jnp.mean(jnp.array(means)))
 
     debug_structure(conf=next(dl))
+
+    print(jnp.mean(jnp.array(means)))
+    print(jnp.array(e_forms))
+

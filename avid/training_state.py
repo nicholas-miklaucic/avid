@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from os import PathLike
 from pathlib import Path
 from shutil import copytree
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import chex
 import jax
@@ -15,8 +15,9 @@ import optax
 import orbax.checkpoint as ocp
 import pandas as pd
 import pyrallis
-from clu import metrics
+from clu import metrics as cmetrics
 from flax import struct
+from flax import linen as nn
 from flax.training import train_state
 
 from avid.checkpointing import best_ckpt
@@ -24,36 +25,19 @@ from avid.config import LossConfig, MainConfig
 from avid.dataset import DataBatch, dataloader
 
 
-@struct.dataclass
-class RegressionMetrics(metrics.Collection):
-    loss: metrics.Average.from_output('loss')
-    rmse: metrics.Average.from_output('rmse')
-    mae: metrics.Average.from_output('mae')
-    grad_norm: metrics.Average.from_output('grad_norm')
-
-
-@struct.dataclass
-class DiffusionMetrics(metrics.Collection):
-    loss: metrics.Average.from_output('loss')
-    rec_loss: metrics.Average.from_output('rec_loss')
-    align_loss: metrics.Average.from_output('align_loss')
-    diffuser_loss: metrics.Average.from_output('diffuser_loss')
-    grad_norm: metrics.Average.from_output('grad_norm')
-
-
 class TrainState(train_state.TrainState):
-    metrics: metrics.Collection
+    metrics: Mapping[str, Any]
     last_grad_norm: float
 
 
-def create_train_state(module, optimizer, rng, metrics):
-    params = module.init(rng, DataBatch.new_empty(52, 24, 5), training=False)
+def create_train_state(module: nn.Module, optimizer, rng, batch: DataBatch):
+    loss, params = module.init_with_output(rng, batch, training=False)
     tx = optimizer
     return TrainState.create(
         apply_fn=module.apply,
         params=params,
         tx=tx,
-        metrics=metrics,
+        metrics={},
         last_grad_norm=0,
     )
 
@@ -89,7 +73,7 @@ class TrainingRun:
             num_epochs=self.num_epochs, steps_in_epoch=self.steps_in_epoch
         )
         self.optimizer = self.config.train.optimizer(self.scheduler)
-        self.state = self.create_train_state()
+        self.model = self.make_model()
 
         if config.restart_from is not None:
             self.state = self.state.replace(
@@ -112,34 +96,35 @@ class TrainingRun:
         self.test_loss = 1000
 
     @staticmethod
-    @ft.partial(jax.jit, static_argnames=('task', 'config'))
-    @chex.assert_max_traces(3)
+    # @ft.partial(jax.jit, static_argnames=('task', 'config'))
+    # @chex.assert_max_traces(3)
     def compute_metrics(*, task: str, config: LossConfig, state: TrainState, batch: DataBatch, rng):
         if task == 'e_form':
             preds = state.apply_fn(state.params, batch, training=False, rngs=rng).squeeze()
             loss = config.regression_loss(preds, batch.e_form)
             mae = jnp.abs(preds - batch.e_form).mean()
             rmse = jnp.sqrt(optax.losses.squared_error(preds, batch.e_form).mean())
-            metric_updates = state.metrics.single_from_model_output(
+            metric_updates = cmetrics.Collection.create_collection(
                 mae=mae, loss=loss, rmse=rmse, grad_norm=state.last_grad_norm
             )
         elif task == 'diled':
-            _loss, losses = state.apply_fn(state.params, batch, training=False, rngs=rng)
+            losses = state.apply_fn(state.params, batch, training=False, rngs=rng)
             losses = {k: jnp.mean(v) for k, v in losses.items()}
-            metric_updates = state.metrics.single_from_model_output(
-                grad_norm=state.last_grad_norm, **losses
-            )
+            metric_updates = dict(grad_norm=state.last_grad_norm, **losses)
         else:
             msg = f'Unknown task {task}'
             raise ValueError(msg)
 
-        metrics = state.metrics.merge(metric_updates)
+        metrics = {
+            k: list(state.metrics.get(k, [])) + [v]
+            for k, v in metric_updates.items()
+        }
         state = state.replace(metrics=metrics)
         return state
 
     @staticmethod
     @ft.partial(jax.jit, static_argnames=('task', 'config'))
-    @chex.assert_max_traces(3)
+    @chex.assert_max_traces(6)
     def train_step(task: str, config: LossConfig, state: TrainState, batch: DataBatch, rng):
         """Train for a single step."""
         rngs = {k: v for k, v in rng.items()} if isinstance(rng, dict) else {'params': rng}
@@ -150,56 +135,59 @@ class TrainingRun:
         def loss_fn(params):
             if task == 'e_form':
                 preds = state.apply_fn(params, batch, training=True, rngs=rngs).squeeze()
-                return (config.regression_loss(preds, batch.e_form), {})
+                loss = config.regression_loss(preds, batch.e_form)
+                return loss
             else:
-                loss, losses = state.apply_fn(params, batch, training=True, rngs=rngs)
-                return loss.mean(), losses
+                losses = state.apply_fn(params, batch, training=True, rngs=rngs)
+                return losses['loss'].mean()
 
-        grad_fn = jax.grad(loss_fn, has_aux=True)
-        grads, losses = grad_fn(state.params)
+        grad_fn = jax.grad(loss_fn)
+        grads = grad_fn(state.params)
         grad_norm = optax.global_norm(grads)
         state = state.apply_gradients(grads=grads, last_grad_norm=grad_norm)
         return state
 
-    def create_train_state(self):
-        if self.config.task == 'e_form':
-            return create_train_state(
-                self.config.build_regressor(), self.optimizer, self.rng, RegressionMetrics.empty()
-            )
+    def make_model(self):
+        if self.config.task == 'diled':
+            return self.config.build_diled()
+        elif self.config.task == 'e_form':
+            return self.config.build_regressor()
         else:
-            return create_train_state(
-                self.config.build_diled(), self.optimizer, self.rng, DiffusionMetrics.empty()
-            )
+            raise ValueError
+
 
     def next_step(self):
         return self.step(self.curr_step + 1, next(self.dl))
 
-    def step(self, step, batch):
+    def step(self, step: int, batch: DataBatch):
         self.curr_step = step
-        if step >= self.num_steps:
+        if step == 0:
+            # initialize model
+            self.state = create_train_state(
+                module=self.model,
+                optimizer=self.optimizer,
+                rng=self.rng,
+                batch=batch
+            )
+        elif step >= self.num_steps:
             return None
 
-        self.state = self.train_step(
+        kwargs = dict(
             task=self.config.task,
             config=self.config.train.loss,
-            state=self.state,
             batch=batch,
             rng=self.rng,
-        )  # get updated train state (which contains the updated parameters)
-        self.state = self.compute_metrics(
-            task=self.config.task,
-            config=self.config.train.loss,
-            state=self.state,
-            batch=batch,
-            rng=self.rng,
-        )  # aggregate batch metrics
+        )
+        self.state = self.train_step(state=self.state, **kwargs)
+        self.state = self.compute_metrics(state=self.state, **kwargs)
 
         if self.should_log or self.should_ckpt:  # one training epoch has passed
-            for metric, value in self.state.metrics.compute().items():  # compute metrics
+            for metric, values in self.state.metrics.items():  # compute metrics
+                value = jnp.mean(jnp.array(values)).item()
                 if metric == 'grad_norm':
-                    self.metrics_history['grad_norm'].append(value.item())  # record metrics
+                    self.metrics_history['grad_norm'].append(value)  # record metrics
                     continue
-                self.metrics_history[f'train_{metric}'].append(value.item())  # record metrics
+                self.metrics_history[f'train_{metric}'].append(value)  # record metrics
 
                 if not self.should_ckpt:
                     if f'test_{metric}' in self.metrics_history:
@@ -210,7 +198,7 @@ class TrainingRun:
                         self.metrics_history[f'test_{metric}'].append(0)
 
             self.state = self.state.replace(
-                metrics=self.state.metrics.empty()
+                metrics={}
             )  # reset train_metrics for next training epoch
 
             self.metrics_history['lr'].append(self.lr)
@@ -233,12 +221,13 @@ class TrainingRun:
                     rng=self.rng,
                 )
 
-            for metric, value in self.test_state.metrics.compute().items():
+            for metric, values in self.test_state.metrics.items():
+                value = jnp.mean(values).item()
                 if metric == 'grad_norm':
                     continue
-                self.metrics_history[f'test_{metric}'].append(value.item())
+                self.metrics_history[f'test_{metric}'].append(value)
                 if f'{metric}' == 'loss':
-                    self.test_loss = value.item()
+                    self.test_loss = value
             self.mngr.save(
                 self.curr_step,
                 args=ocp.args.StandardSave(self.ckpt()),

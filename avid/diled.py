@@ -11,10 +11,13 @@ import numpy as np
 from chex import dataclass
 from eins import EinsOp
 from flax import linen as nn
+import optax
 
 from avid.databatch import DataBatch
 from avid.diffusion import DiffusionInput, DiffusionModel
-from avid.layers import LazyInMLP
+from avid.layers import LazyInMLP, PermInvariantEncoder
+from avid.utils import debug_stat, debug_structure
+from avid.vit import ABY_IDENTITY, Encoder, ViTRegressor
 
 # class O3ImageEmbed(nn.Module):
 #     """Embeds a 3D image into a sequnce of tokens."""
@@ -72,15 +75,15 @@ class SpeciesTwoWayEmbed(nn.Module):
 
     def species_embed_matrix(self):
         """Generates species embedding matrix of orthogonal vectors: (n_species, embed_dim)."""
-        pass
+        raise NotImplementedError
 
     def __call__(self, data: DataBatch):
         """Embeds the batch as a 3D image, shape batch n n n embed_dim."""
-        pass
+        raise NotImplementedError
 
     def decode(self, im, data: DataBatch):
         """Projects inputs to obtain the original densities."""
-        pass
+        raise NotImplementedError
 
 class OrthoSpeciesEmbed(SpeciesTwoWayEmbed):
     """Embedding module that supports recovering densities. Uses orthogonal embeddings."""
@@ -121,7 +124,7 @@ class OrthoSpeciesEmbed(SpeciesTwoWayEmbed):
             im, self.species_embed_matrix()
         )
         return proj
-    
+
 class LossySpeciesEmbed(SpeciesTwoWayEmbed):
     """Embedding module that supports recovering densities."""
     n_species: int
@@ -133,7 +136,7 @@ class LossySpeciesEmbed(SpeciesTwoWayEmbed):
             inner_dims=[64],
             out_dim=self.n_species,
             name='species_decoder',
-            inner_act=nn.gelu,            
+            inner_act=nn.gelu,
         )
 
     def species_embed_matrix(self):
@@ -142,12 +145,14 @@ class LossySpeciesEmbed(SpeciesTwoWayEmbed):
 
     def __call__(self, data: DataBatch):
         """Embeds the batch as a 3D image, shape batch n n n embed_dim."""
-        spec = jax.nn.one_hot(data.species, self.n_species, dtype=jnp.bfloat16)
+        # spec = jax.nn.one_hot(data.species, self.n_species, dtype=jnp.bfloat16)
         # debug_structure(spec=spec, mat=self.species_embed_matrix())
-        embs = self.emb(data.species) * data.mask[..., None]        
+        embs = self.emb(data.species)
+
+        # debug_structure(embs=embs, dens=data.density, mask=data.mask)
         return einops.einsum(
-            data.density,
-            embs,
+            data.density * data.mask[:, None, None, None, :].astype(data.density.dtype),
+            jnp.where(data.mask[..., None], embs, 0),
             'batch n1 n2 n3 max_spec, batch max_spec emb -> batch n1 n2 n3 emb',
         )
 
@@ -256,7 +261,7 @@ class EncoderDecoder(nn.Module):
             self.dec_patch_proj = nn.DenseGeneral(features=feats, axis=-1, dtype=jnp.bfloat16)
         else:
             self.dec_patch_proj = nn.DenseGeneral(
-                features=np.prod(self.patch_conv_strides) ** 3 * self.species_embed_dim,
+                features=int(np.prod(self.patch_conv_strides) ** 3 * self.species_embed_dim),
                 axis=-1,
                 dtype=jnp.bfloat16,
             )
@@ -309,7 +314,7 @@ class EFormCategory(Category):
     @property
     def num_categories(self) -> int:
         return self.num_cats
-    
+
 
 @dataclass
 class SpaceGroupCategory(Category):
@@ -320,13 +325,13 @@ class SpaceGroupCategory(Category):
             return data.space_group - 195
         else:
             return data.space_group - 1
-    
+
     @property
     def num_categories(self) -> int:
         if self.just_cubic:
-            return 230
+            return 230 - 194 + 1
         else:
-            return 230 - 194
+            return 230 + 1
 
 
 class DiLED(nn.Module):
@@ -335,6 +340,8 @@ class DiLED(nn.Module):
     encoder_decoder: EncoderDecoder
     diffusion: DiffusionModel
     category: Category
+    encoder: Encoder
+    head: nn.Module
     w: float = 1
     class_dropout: float = 0.5
 
@@ -347,25 +354,56 @@ class DiLED(nn.Module):
         eps_0 = jax.random.normal(self.make_rng('noise'), shape=enc.shape)
         x_1 = enc + beta_0 * eps_0
 
-        dens, rec_x_0, dec_conv = self.encoder_decoder.patch_decode(x_1, data, training=training)
+        dens, rec_x_0, dec = self.encoder_decoder.patch_decode(x_1, data, training=training)
+
+        losses = {}
 
         def voxel_loss(x1, x2):
             return jnp.sqrt(jnp.mean(jnp.square(x1 - x2)))
 
-        def l_rec():
-            dens_aligned = jnp.take_along_axis(dens, data.species[:, None, None, None, :], axis=-1)
-            rec_loss = voxel_loss(dens_aligned, data.density)
-            loss = rec_loss + 0.01 * voxel_loss(jnp.zeros_like(patch), patch)
-            return loss * 1000
+        # print(data.species)
+        # debug_structure(dens=dens)
+        # dens_aligned = jnp.take_along_axis(dens, data.species[:, None, None, None, :], axis=-1)
+        dens_aligned = dens
+        losses['dens_rec_loss'] = 1 * voxel_loss(dens_aligned, data.density)
+        # debug_structure(x0=x_0, conv=conv, patch=patch, rec_x0=rec_x_0, dec=dec, dens=dens)
+        # debug_stat(x0=x_0, conv=conv, patch=patch, rec_x0=rec_x_0, dec=dec, dens=dens)
+        losses['patch_reg_loss'] = 1 * voxel_loss(jnp.zeros_like(patch), patch)
+
+        y = self.category(data)
+
+        encoder = self.encoder.copy(equivariant=True)
+        abys = ABY_IDENTITY
+
+        patch_seq = EinsOp('b n n n d -> b (n n n) d')(patch)
+        out = encoder(patch_seq, abys, training=training)
+
+        # batch seq dim -> batch dim*2
+        out = PermInvariantEncoder()(out, axis=1, keepdims=False)
+        out = nn.LayerNorm(dtype=out.dtype)(out)
+        # debug_structure(out=out)
+
+        head = self.head.copy(out_dim=3 + self.category.num_categories)
+        out = jax.vmap(lambda x: head(x, training=training))(out)
+
+        debug_structure(out=out)
+        e_form, bandgap, magmom, *y_logits = out.T
+        bandgap = nn.leaky_relu(bandgap)
+        magmom = nn.leaky_relu(magmom)
+        y_logits = jnp.array(y_logits).T
+
+        losses['e_form_mae'] = jnp.mean(jnp.abs(e_form - data.e_form))
+        losses['bandgap_mae'] = jnp.mean(jnp.abs(bandgap - data.bandgap))
+        losses['magmom_mae'] = jnp.mean(jnp.abs(magmom - data.magmom))
+        losses['spacegroup_ce'] = optax.losses.softmax_cross_entropy_with_integer_labels(y_logits, y)
 
         if self.w == 0:
-            loss = l_rec()
-            return (loss, {'loss': loss, 'rec_loss': loss, 'diffuser_loss': 0, 'align_loss': 0})
+            losses['loss'] = sum(losses.values())
+            return losses
 
         t = jax.random.randint(
             self.make_rng('time'), [1], minval=1, maxval=self.diffusion.schedule.max_t
         )
-        y = self.category(data)
 
         y_mask = jnp.where(
             jax.random.uniform(self.make_rng('noise'), (y.shape[0],)) < self.class_dropout,
@@ -377,25 +415,23 @@ class DiLED(nn.Module):
         def l_align(eps):
             x_2 = self.diffusion.q_sample(x_1, 2, eps)
             mu_2_1 = self.diffusion.mu_eps_sigma(
-                DiffusionInput(x_t=x_2, t=1, y=y_mask), training=training
+                DiffusionInput(x_t=x_2, t=jnp.array([1]), y=y_mask),
+                training=training
             )
-            loss = voxel_loss(patch.astype(jnp.float32), mu_2_1['mu'].astype(jnp.float32))
+            loss = voxel_loss(patch, mu_2_1['mu'])
             return loss * 1000
+
+        losses['align_loss'] = l_align(eps) / self.diffusion.schedule.max_t
 
         def l_diffusion(eps):
             x_t = self.diffusion.q_sample(enc, t, eps)
             mu_eps = self.diffusion.mu_eps_sigma(
-                DiffusionInput(x_t=x_t, t=t, y=y_mask), training=training
+                DiffusionInput(x_t=x_t, t=jnp.array([t]), y=y_mask),
+                training=training
             )
-            return voxel_loss(mu_eps['eps'].astype(jnp.float32), eps.astype(jnp.float32))
+            return voxel_loss(mu_eps['eps'], eps)
 
-        rec_loss = l_rec() / self.diffusion.schedule.max_t
-        align_loss = l_align(eps) / self.diffusion.schedule.max_t
-        diffuser_loss = self.w * l_diffusion(eps)
-        loss = {
-            'loss': rec_loss + align_loss + diffuser_loss,
-            'rec_loss': rec_loss,
-            'align_loss': align_loss,
-            'diffuser_loss': diffuser_loss,
-        }
-        return (loss['loss'], loss)
+        losses['diffusion_loss'] = self.w * l_diffusion(eps)
+
+        losses['loss'] = sum(losses.values())
+        return losses

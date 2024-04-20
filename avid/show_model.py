@@ -7,7 +7,7 @@ from jax.lib import xla_client
 
 from avid.config import MainConfig
 from avid.dataset import load_file
-from avid.utils import debug_structure, flax_summary
+from avid.utils import debug_stat, debug_structure, flax_summary
 
 
 # https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev.html
@@ -36,11 +36,13 @@ def show_model(config: MainConfig, make_hlo_dot=False):
     flax_summary(mod, rngs=rngs, **kwargs)
 
     def loss(params):
-        preds = mod.apply(params, batch, training=False)
+        preds = mod.apply(params, batch, rngs=rngs, training=False)
         if config.task == 'e_form':
-            return config.train.loss.regression_loss(preds, batch.e_form.reshape(-1, 1))
+            return {'reg_loss': config.train.loss.regression_loss(preds, batch.e_form.reshape(-1, 1))}
         else:
-            return jnp.mean(preds)
+            return preds
+
+    debug_stat(jax.grad(lambda x: jnp.mean(loss(x)['loss']))(params))
 
     if not make_hlo_dot:
         return

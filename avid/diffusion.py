@@ -71,7 +71,7 @@ class LabelEmbed(nn.Module):
         self.embeddings = nn.Embed(self.num_classes + 1, self.embed_dim)
 
     def __call__(self, y: jax.Array) -> jax.Array:
-        return self.embeddings(y)
+        return self.embeddings(y + 1)
 
 
 class DiffusionNoiseSchedule(metaclass=abc.ABCMeta):

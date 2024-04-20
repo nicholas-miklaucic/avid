@@ -263,7 +263,7 @@ class PermInvariantEncoder(nn.Module):
         Invariant over the order of tokens."""
 
         x_mean = jnp.mean(x, axis=axis, keepdims=keepdims)
-        x_std = jnp.std(x, axis=axis, keepdims=keepdims)
+        # x_std = jnp.std(x, axis=axis, keepdims=keepdims)
 
         # x_whiten = (x - x_mean) / (x_std + 1e-8)
 
@@ -283,4 +283,4 @@ class PermInvariantEncoder(nn.Module):
         # quants = jnp.linspace(eps, 1 - eps, 14, dtype=jnp.bfloat16)
         # from ott.tools.soft_sort import quantile
         # x_quants = quantile(x, quants, axis=-1, weight=10 / x.shape[-1])
-        return jnp.concat([x_mean, x_std], axis=-1)
+        return jnp.concat([x_mean], axis=-1)

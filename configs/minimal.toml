@@ -10,6 +10,12 @@ name = "Identity"
 [vit.species_embed.spec_embed]
 out_dim = 64
 
+[diled.head.activation]
+name = "relu"
+
+[diled.head.final_activation]
+name = "Identity"
+
 [mlp.token_mixer.activation]
 name = "gelu"
 

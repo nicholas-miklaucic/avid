@@ -1,68 +1,8 @@
 [mlp.token_mixer]
 equivariant = true
 
-[vit.head.activation]
-name = "relu"
-
-[vit.head.final_activation]
-name = "Identity"
-
 [vit.species_embed.spec_embed]
 out_dim = 64
 
-[diled.head.activation]
-name = "relu"
-
-[diled.head.final_activation]
-name = "Identity"
-
-[mlp.token_mixer.activation]
-name = "gelu"
-
-[mlp.token_mixer.final_activation]
-name = "Identity"
-
-[mlp.channel_mixer.activation]
-name = "gelu"
-
-[mlp.channel_mixer.final_activation]
-name = "Identity"
-
-[mlp.head.activation]
-name = "relu"
-
-[mlp.head.final_activation]
-name = "Identity"
-
 [mlp.species_embed.spec_embed]
 out_dim = 64
-
-[vit.encoder.mlp.activation]
-name = "relu"
-
-[vit.encoder.mlp.final_activation]
-name = "Identity"
-
-[vit.species_embed.spec_embed.activation]
-name = "relu"
-
-[vit.species_embed.spec_embed.final_activation]
-name = "Identity"
-
-[diled.backbone.time_mlp.activation]
-name = "relu"
-
-[diled.backbone.time_mlp.final_activation]
-name = "Identity"
-
-[mlp.species_embed.spec_embed.activation]
-name = "relu"
-
-[mlp.species_embed.spec_embed.final_activation]
-name = "Identity"
-
-[diled.backbone.encoder.mlp.activation]
-name = "relu"
-
-[diled.backbone.encoder.mlp.final_activation]
-name = "Identity"

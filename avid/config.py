@@ -2,7 +2,7 @@ from functools import cached_property
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Literal, Mapping, Optional
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +10,7 @@ import optax
 import pyrallis
 from flax import linen as nn
 from flax.struct import dataclass
-from pyrallis import field
+from pyrallis.fields import field
 
 from eins.elementwise import ElementwiseOp
 from eins import ElementwiseOps as E
@@ -159,8 +159,8 @@ class CLIConfig:
         from rich.pretty import install as pretty_install
         from rich.traceback import install as traceback_install
 
-        pretty_install(crop=True, max_string=100)
-        traceback_install()
+        pretty_install(crop=True, max_string=100, max_length=10)
+        traceback_install(show_locals=False)
 
         import flax.traceback_util as ftu
 
@@ -172,7 +172,7 @@ class CLIConfig:
             datefmt='[%X]',
             handlers=[
                 RichHandler(
-                    rich_tracebacks=True,
+                    rich_tracebacks=False,
                     show_time=False,
                     show_level=False,
                     show_path=False,
@@ -250,10 +250,10 @@ class MLPConfig:
     inner_dims: list[int] = field(default_factory=list)
 
     # Inner activation.
-    activation: Layer = field(default=Layer('relu'))
+    activation: str = 'gelu'
 
     # Final activation.
-    final_activation: Layer = field(default=Layer('Identity'))
+    final_activation: str = 'Identity'
 
     # Output dimension. None means the same size as the input.
     out_dim: Optional[int] = None
@@ -261,23 +261,27 @@ class MLPConfig:
     # Dropout.
     dropout: float = 0.1
 
+    # Number of heads, for equivariant layer.
+    num_heads: int = 1
+
     # Whether to make the layer equivariant.
     equivariant: bool = False
 
-    def build(self) -> nn.Module:
+    def build(self, equivariant=None) -> nn.Module:
         """Builds the head from the config."""
-        if self.equivariant:
+        equivariant = self.equivariant if equivariant is None else equivariant
+        if equivariant:
             return EquivariantMixerMLP(
-                head_muls=self.inner_dims,
+                num_heads=self.num_heads,
                 dropout_rate=self.dropout,
-                activation=self.activation.build(),
+                activation=Layer(self.activation).build(),
             )
         else:
             return LazyInMLP(
                 inner_dims=self.inner_dims,
                 out_dim=self.out_dim,
-                inner_act=self.activation.build(),
-                final_act=self.final_activation.build(),
+                inner_act=Layer(self.activation).build(),
+                final_act=Layer(self.final_activation).build(),
                 dropout_rate=self.dropout,
             )
 
@@ -339,36 +343,53 @@ class ViTInputConfig:
 
 
 @dataclass
-class ViTEncoderConfig:
-    """Settings for vision transformer encoder."""
+class EncoderConfig:
+    """Settings for vision transformer encoder: either transformer or MLP mixer."""
 
     # Number of encoder layers.
     num_layers: int = 2
 
-    # Number of heads for MHSA.
-    num_heads: int = 4
+    # Number of heads for MHSA. Unused in MLP mixer.
+    num_heads: int = 16
 
-    # Dropout rate applied to inputs.
+    # Dropout rate applied to inputs during channel mixing.
     enc_dropout_rate: float = 0.1
 
-    # Dropout rate applied to inputs during attention.
-    enc_attention_dropout_rate: float = 0.0
+    # Dropout rate applied to inputs during token mixing/attention.
+    enc_attention_dropout_rate: float = 0.1
 
     # MLP config after attention layer. The out dim doesn't matter: it's constrained to the input.
     mlp: MLPConfig = field(default_factory=MLPConfig)
 
-    # Whether equivariant attention is used.
-    equivariant: bool = False
+    # Token mixer MLP config. Equivariance is taken from the param in this config.
+    token_mixer: MLPConfig = field(default_factory=MLPConfig)
 
-    def build(self) -> Encoder:
-        return Encoder(
-            num_layers=self.num_layers,
-            num_heads=self.num_heads,
-            dropout_rate=self.enc_dropout_rate,
-            attention_dropout_rate=self.enc_attention_dropout_rate,
-            mlp=self.mlp.build(),
-            equivariant=self.equivariant,
-        )
+    # Whether equivariant attention is used.
+    equivariant: bool = True
+
+    # encoder type
+    encoder_type: str = "vit"
+
+    def build(self) -> Encoder | MLPMixer:
+        if self.encoder_type == 'vit':
+            return Encoder(
+                num_layers=self.num_layers,
+                num_heads=self.num_heads,
+                dropout_rate=self.enc_dropout_rate,
+                attention_dropout_rate=self.enc_attention_dropout_rate,
+                mlp=self.mlp.build(),
+                equivariant=self.equivariant,
+            )
+        elif self.encoder_type == 'mlp':
+            return MLPMixer(
+                num_layers=self.num_layers,
+                dropout_rate=self.enc_dropout_rate,
+                attention_dropout_rate=self.enc_attention_dropout_rate,
+                tokens_mlp=self.token_mixer.build(equivariant=self.equivariant),
+                channels_mlp=self.mlp.build(),
+            )
+        else:
+            raise ValueError
 
 
 @dataclass
@@ -435,7 +456,7 @@ class ViTRegressorConfig:
     """Composite config for ViT regressor, including all parts."""
 
     vit_input: ViTInputConfig = field(default_factory=ViTInputConfig)
-    encoder: ViTEncoderConfig = field(default_factory=ViTEncoderConfig)
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
     head: MLPConfig = field(default_factory=MLPConfig)
     species_embed: SpeciesEmbedConfig = field(default_factory=SpeciesEmbedConfig)
     downsample: DownsampleConfig = field(default_factory=DownsampleConfig)
@@ -458,9 +479,8 @@ class ViTRegressorConfig:
             equivariant=self.equivariant,
         )
 
-
 @dataclass
-class MLPMixerConfig:
+class MLPMixerRegressorConfig:
     """Composite config for MLP Mixer regressor, including all parts."""
 
     # Patch size: p, where image is broken up into p x p x p cubes.
@@ -470,10 +490,11 @@ class MLPMixerConfig:
     # Patch inner dimension.
     patch_latent_dim: int = 512
     token_mixer: MLPConfig = field(
-        default=MLPConfig(activation=Layer('gelu'), equivariant=True), is_mutable=True
+        default=MLPConfig(activation='gelu', equivariant=True), is_mutable=True
     )
-    channel_mixer: MLPConfig = field(default_factory=lambda: MLPConfig(activation=Layer('gelu')))
-    num_blocks: int = 4
+    channel_mixer: MLPConfig = field(default_factory=MLPConfig)
+    num_layers: int = 4
+    num_heads: int = 4
     head: MLPConfig = field(default_factory=MLPConfig)
     species_embed: SpeciesEmbedConfig = field(default_factory=SpeciesEmbedConfig)
     downsample: DownsampleConfig = field(default_factory=DownsampleConfig)
@@ -487,8 +508,8 @@ class MLPMixerConfig:
             downsample=self.downsample.build(),
             head=head,
             mixer=MLPMixer(
-                out_dim=self.out_dim,
-                num_blocks=self.num_blocks,
+                num_heads=self.num_heads,
+                num_layers=self.num_layers,
                 tokens_mlp=self.token_mixer.build(),
                 channels_mlp=self.channel_mixer.build(),
             ),
@@ -506,7 +527,7 @@ class DiTConfig:
     time_dim: int = 64
     time_mlp: MLPConfig = field(default_factory=MLPConfig)
     label_dim: int = 64
-    encoder: ViTEncoderConfig = field(default_factory=ViTEncoderConfig)
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
     condition_dropout: float = 0.0
 
     def build(self, num_classes: int, hidden_dim: int) -> DiT:
@@ -573,10 +594,13 @@ class DiLEDConfig:
     patch_conv_features: list[int] = field(default_factory=lambda: [384])
     use_dec_conv: bool = False
     species_embed_dim: int = 128
+    species_embed_type: str = 'lossy'
     backbone: DiTConfig = field(default_factory=DiTConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     category: DiffusionCategoryConfig = field(default_factory=DiffusionCategoryConfig)
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
     head: MLPConfig = field(default_factory=MLPConfig)
+    perm_head: MLPConfig = field(default_factory=MLPConfig)
     w: float = 1
 
     def build(self, data: DataConfig) -> DiLED:
@@ -586,6 +610,7 @@ class DiLEDConfig:
             patch_conv_features=self.patch_conv_features,
             patch_conv_sizes=self.patch_conv_sizes,
             species_embed_dim=self.species_embed_dim,
+            species_embed_type=self.species_embed_type,
             n_species=len(data.metadata['elements']),
             use_dec_conv=self.use_dec_conv,
         )
@@ -600,8 +625,9 @@ class DiLEDConfig:
             diffusion=self.diffusion.build(dit),
             category=self.category.build(data),
             class_dropout=self.diffusion.class_dropout,
-            encoder=dit.encoder.copy(),
+            encoder=self.encoder.build(),
             head=self.head.build(),
+            perm_encoder=self.perm_head.build(),
             w=self.w,
         )
 
@@ -724,7 +750,7 @@ class MainConfig:
     vit: ViTRegressorConfig = field(default_factory=ViTRegressorConfig)
     # diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     diled: DiLEDConfig = field(default_factory=DiLEDConfig)
-    mlp: MLPMixerConfig = field(default_factory=MLPMixerConfig)
+    mlp: MLPMixerRegressorConfig = field(default_factory=MLPMixerRegressorConfig)
 
     regressor: str = 'vit'
 

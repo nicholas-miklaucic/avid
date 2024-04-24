@@ -10,8 +10,9 @@ from jaxtyping import Array, Float
 
 from avid.databatch import DataBatch
 from avid.encoder import ReduceSpeciesEmbed
-from avid.layers import LazyInMLP, MLPMixer, PermInvariantEncoder
+from avid.layers import DeepSetEncoder, LazyInMLP, MLPMixer, PermInvariantEncoder
 from avid.utils import tcheck
+from avid.vit import ABY_IDENTITY
 
 # equivariance to rotations/reflections distinguishes only a few points: the center, the face centers, the
 # corners, and the diagonals that are parallel to a face.
@@ -95,18 +96,17 @@ class MLPMixerRegressor(nn.Module):
     im_embed: O3ImageEmbed
     mixer: MLPMixer
     head: LazyInMLP
+    perm_head: LazyInMLP
 
     @nn.compact
-    def __call__(self, im: DataBatch, training: bool):
+    def __call__(self, im: DataBatch, training: bool, abys=ABY_IDENTITY):
         out = self.spec_embed(im, training=training)
         out = self.downsample(out)
         out = self.im_embed(out)
-        out = self.mixer(out, training=training)
+        out = self.mixer(out, training=training, abys=abys)
 
         # out = reduce(out, 'batch seq dim -> batch dim', 'mean')
-        out = rearrange(out, 'batch seq dim -> batch dim seq')
-        out = PermInvariantEncoder()(out)
-        out = rearrange(out, 'batch dim enc_out -> batch (dim enc_out)')
+        out = DeepSetEncoder(phi=self.perm_head)(out, training=training)
         # debug_structure(out=out)
-        out = jax.vmap(lambda x: self.head(x, training=training))(out)
+        out = self.head(out, training=training)
         return out

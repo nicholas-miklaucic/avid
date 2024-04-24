@@ -4,11 +4,13 @@ import functools
 from typing import Callable, Optional, Sequence
 
 import einops
+from eins import EinsOp
+import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from jaxtyping import Array, Float
 
-from avid.utils import tcheck
+from avid.utils import debug_structure, tcheck
 
 
 class Identity(nn.Module):
@@ -24,7 +26,7 @@ class LazyInMLP(nn.Module):
 
     inner_dims: Sequence[int]
     out_dim: Optional[int] = None
-    inner_act: Callable = nn.relu
+    inner_act: Callable = nn.gelu
     final_act: Callable = Identity()
     dropout_rate: float = 0.0
     kernel_init: Callable = nn.initializers.glorot_normal()
@@ -56,13 +58,41 @@ class LazyInMLP(nn.Module):
 
 
 # 8^6 x subspace_dim
-Q = jnp.load('precomputed/equiv_basis_8.npy')
-ng6, subspace_dim = Q.shape
-ng = round(ng6 ** (1 / 6))
-assert ng**6 == ng6
-Q = Q.reshape(ng**3, ng**3, subspace_dim).astype(jnp.bfloat16)
-conv_kernel = Q[0, ...].reshape(ng, ng, ng, 1, 35)
-counts = jnp.sum(conv_kernel, axis=(0, 1, 2))
+
+with jax.default_device(jax.devices('cpu')[0]):
+    Q = jnp.load('precomputed/equiv_basis_8.npy')
+    ng6, subspace_dim = Q.shape
+    ng = round(ng6 ** (1 / 6))
+    assert ng**6 == ng6
+    Q = Q.reshape(ng**3, ng**3, subspace_dim).astype(jnp.bfloat16)
+    conv_kernel = Q[0, ...].reshape(ng, ng, ng, 35)
+    counts = jnp.sum(conv_kernel, axis=(0, 1, 2))
+
+
+with jax.default_device(jax.devices('cpu')[0]):
+    import numpy as np
+    batch = 4
+    chan = 3
+    n = 8
+    dtype = jnp.bfloat16
+    
+    ijk = jnp.transpose(jnp.mgrid[0:n, 0:n, 0:n].astype(jnp.int16)).reshape(-1, 3)
+    sub = ijk[:, None, :] - ijk[None, :, :]
+
+    idx = jnp.sort(jnp.minimum(jnp.abs(sub), n - jnp.abs(sub)), axis=-1)
+    orig = idx.shape
+
+    # uniq, inv = jnp.unique(idx.reshape(-1, 3), axis=0, return_inverse=True)
+    # print(uniq[:5, ...])
+    # print(uniq.shape)
+
+    dmax = (n) // 2
+    inv2 = (idx @ jnp.array([dmax ** 2, dmax, 1])).astype(jnp.int16)
+    inv2_i, inv2, counts = jnp.unique(inv2.reshape(-1), return_inverse=True, return_counts=True)
+    # jnp.allclose(inv2, inv)
+
+    basis = jax.nn.one_hot(inv2, inv2_i.shape[0], dtype=jnp.bool_).reshape(*orig[:-1], inv2_i.shape[0])
+    conv_kernel = basis[0, :, :]
 
 
 class EquivariantMHA(nn.Module):
@@ -134,52 +164,66 @@ class EquivariantMHA(nn.Module):
 
 class EquivariantLinear(nn.Module):
     kernel_init: Callable = nn.initializers.normal(stddev=1e-2, dtype=jnp.bfloat16)
+    num_heads: int = 1
 
     @nn.compact
-    def __call__(self, x, out_head_mul: int):
+    def __call__(self, x: Float[Array, 'batch seq chan']) -> Float[Array, 'batch seq chan']:
+        """
+        """
         batch, out_dim, chan = x.shape
 
+        assert chan % self.num_heads == 0, f'{chan} must divide {self.num_heads}: {x.shape}'
         assert out_dim**2 == ng6, f'{x.shape} is not valid!'
 
         conv = nn.Conv(
             features=1,
             kernel_size=(ng, ng, ng),
             use_bias=False,
-            padding='CIRCULAR',
+            padding='VALID',
             dtype=jnp.bfloat16,
         )
 
-        x_im = einops.rearrange(
-            x, 'batch (n1 n2 n3) chan -> (batch chan) n1 n2 n3', n1=ng, n2=ng, n3=ng
-        )[..., None]
+        # debug_structure(x=x)
+        x_im = EinsOp('batch (8 8 8) ch*h -> h (batch ch) 8 8 8', symbol_values={'h': self.num_heads})(x)
+        
+        kn = 2 * ng - 1
+        x_im = jnp.tile(x_im, (1, 1, 2, 2, 2))[:, :, :kn, :kn, :kn, None]        
         # x_im = einops.rearrange(
         #     x, 'batch (n1 n2 n3) chan -> batch n1 n2 n3 chan', n1=ng, n2=ng, n3=ng
         # )
-        kernel = self.param('kernel', self.kernel_init, (subspace_dim, 1))
-        # QK is out_dim x out_dim
-        # is this the most efficient way to do this?
-        kernel_expanded = einops.einsum(conv_kernel, kernel, 'a b c d s, s ch -> a b c d ch')
-        conv_out = conv.apply({'params': {'kernel': kernel_expanded}}, x_im)
-        out = einops.rearrange(
-            conv_out, '(batch chan) n1 n2 n3 1 -> batch (n1 n2 n3) chan', batch=batch
-        )
+        kernel = self.param('kernel', self.kernel_init, (subspace_dim, self.num_heads), jnp.bfloat16)        
+        kernel_expanded = EinsOp('(n=8 n n) s, s h -> h n n n 1 1')(conv_kernel, kernel)
+        
+
+        def conv(lhs, rhs):
+            return jax.lax.conv_general_dilated(
+                lhs,
+                rhs,
+                window_strides=(1, 1, 1),
+                padding='VALID',
+                dimension_numbers=('NXYZC', 'XYZIO', 'NXYZC')
+            )
+
+        conv_out = jax.vmap(conv)(x_im, kernel_expanded).squeeze(-1)
+        # conv_out = jnp.roll(conv_out, (ng // 2, ng // 2, ng // 2), (-3, -2, -1))
+        # conv_out = conv.apply({'params': {'kernel': kernel_expanded[:, :, :, 1, :, :]}}, x_im)        
+        out_op = EinsOp('h (batch ch) n n n -> batch (n n n) (ch*h)', symbol_values={'batch': batch})        
+        out = out_op(conv_out)                        
         return out
 
 
 class EquivariantMixerMLP(nn.Module):
+    num_heads: int = 1
     activation: Callable = nn.gelu
     dropout_rate: float = 0.0
-    head_muls: Sequence[int] = (2, 1)
 
     @nn.compact
-    def __call__(self, x, training: bool = False):
-        for head_mul in self.head_muls:
-            linear = EquivariantLinear()
-            x = linear(x, head_mul)
-            x = nn.Dropout(self.dropout_rate, deterministic=not training)(x)
-            x = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
-            x = self.activation(x)
-
+    def __call__(self, x: Float[Array, 'batch seq chan'], training: bool) -> Float[Array, 'batch seq chan']:
+        x = nn.LayerNorm(dtype=x.dtype)(x)
+        x = EquivariantLinear(num_heads=self.num_heads)(x)
+        x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not training)
+        x = self.activation(x)
+        x = EquivariantLinear(num_heads=self.num_heads)(x)
         return x
 
 
@@ -194,27 +238,29 @@ class MixerBlock(nn.Module):
 
     tokens_mlp: nn.Module
     channels_mlp: LazyInMLP
+    dropout_rate: float = 0.1
+    attention_dropout_rate: float = 0.1
 
     @nn.compact
-    def __call__(self, x, training: bool = False) -> Array:
-        # Layer Normalization
-        y = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
-        # # Transpose
-        # y = jnp.swapaxes(y, 1, 2)
-        # MLP 1
-        y = self.tokens_mlp(y, training)
-        # Transpose
-        # y = jnp.swapaxes(y, 1, 2)
-        # Skip Connection
-        # now it's possible that the channels have changed
-        # if so, broadcast x to fit
-        x = x[..., None] + y.reshape(*x.shape, -1)
-        x = einops.rearrange(x, 'batch dim chan chan_mul -> batch dim (chan chan_mul)')
-        # Layer Normalization
-        y = nn.LayerNorm(dtype=x.dtype, use_bias=False, use_scale=False)(x)
-        # MLP 2 with Skip Connection
-        out = x + self.channels_mlp(y, training)
-        return out
+    def __call__(self, inputs: Float[Array, 'batch seq chan'], abys: Float[Array, '6 chan'], training: bool) -> Float[Array, 'batch seq chan']:
+        a1, b1, y1, a2, b2, y2 = abys
+        x = nn.LayerNorm(scale_init=nn.zeros, dtype=inputs.dtype)(inputs)
+        x = x * y1 + b1
+
+        x = self.tokens_mlp(x, training=training)
+        x = nn.Dropout(rate=self.attention_dropout_rate)(x, deterministic=not training)
+        x = x * a1
+        x = x + inputs
+
+
+        y = nn.LayerNorm(dtype=x.dtype, scale_init=nn.zeros)(x)
+        y = y * y2 + b2
+        y = self.channels_mlp(y, training=training)
+        y = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not training)
+
+        y = y * a2
+
+        return x + y
 
 
 class MLPMixer(nn.Module):
@@ -232,25 +278,42 @@ class MLPMixer(nn.Module):
         dtype: the dtype of the computation (default: float32)
     """
 
-    out_dim: int
-    num_blocks: int
+    num_layers: int
     tokens_mlp: nn.Module
     channels_mlp: LazyInMLP
+    dropout_rate: float = 0.1
+    attention_dropout_rate: float = 0.1
 
     @nn.compact
-    def __call__(self, inputs, *, training: bool = False) -> Array:
+    def __call__(self, inputs, abys, *, training: bool) -> Array:
         x = inputs
         # Num Blocks x Mixer Blocks
-        for _ in range(self.num_blocks):
+        for _ in range(self.num_layers):
             x = MixerBlock(
                 tokens_mlp=self.tokens_mlp.copy(),
                 channels_mlp=self.channels_mlp.copy(),
-            )(x, training=training)
+                dropout_rate=self.dropout_rate,
+                attention_dropout_rate=self.attention_dropout_rate,
+            )(x, abys, training=training)
         # Output Head
-        x = nn.LayerNorm(
-            dtype=x.dtype, name='pre_head_layer_norm', use_bias=False, use_scale=False
-        )(x)
+        x = nn.LayerNorm(dtype=x.dtype, name='pre_head_layer_norm')(x)
         return x
+
+
+class DeepSetEncoder(nn.Module):
+    """Deep Sets with several types of pooling. Permutation-invariant encoder."""
+    phi: nn.Module
+
+    @nn.compact
+    def __call__(self, x: Float[Array, 'batch token chan'], training: bool) -> Float[Array, 'batch out_dim']:
+        phi_x = self.phi(x, training=training)
+        phi_x = EinsOp('batch token out_dim -> batch out_dim token')(phi_x)
+        op = 'batch out_dim token -> batch out_dim'
+        phi_x_mean = EinsOp(op, reduce='mean')(phi_x)
+        phi_x_std = EinsOp(op, reduce='std')(phi_x)
+        phi_x = jnp.concatenate([phi_x_mean, phi_x_std], axis=-1)
+        normed = nn.LayerNorm(dtype=x.dtype)(phi_x)
+        return normed
 
 
 class PermInvariantEncoder(nn.Module):
@@ -258,10 +321,8 @@ class PermInvariantEncoder(nn.Module):
     Uses mean, std, and differentiable quantiles."""
 
     @nn.compact
-    def __call__(self, x, axis=-1, keepdims=True):
-        """x: batch chan token
-        Invariant over the order of tokens."""
-
+    def __call__(self, x: Float[Array, 'batch token chan'], axis=-1, keepdims=True) -> Float[Array, 'batch out_dim']:
+        x = EinsOp('batch token chan -> batch chan token')(x)
         x_mean = jnp.mean(x, axis=axis, keepdims=keepdims)
         # x_std = jnp.std(x, axis=axis, keepdims=keepdims)
 

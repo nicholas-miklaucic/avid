@@ -2,6 +2,7 @@
 Generalizable Diffusion with Learned Encoding-Decoding.
 """
 
+from math import perm
 from typing import Sequence
 
 import einops
@@ -15,7 +16,7 @@ import optax
 
 from avid.databatch import DataBatch
 from avid.diffusion import DiffusionInput, DiffusionModel
-from avid.layers import LazyInMLP, PermInvariantEncoder
+from avid.layers import DeepSetEncoder, LazyInMLP, MLPMixer, PermInvariantEncoder
 from avid.utils import debug_stat, debug_structure
 from avid.vit import ABY_IDENTITY, Encoder, ViTRegressor
 
@@ -91,11 +92,13 @@ class OrthoSpeciesEmbed(SpeciesTwoWayEmbed):
     embed_dim: int
 
     def setup(self):
-        self.mat = jnp.eye(self.embed_dim, self.n_species)
+        if self.embed_dim < self.n_species:
+            raise ValueError('Must have more embed dims than species')
+        self.mat = jnp.eye(self.embed_dim, self.n_species, dtype=jnp.bfloat16)
         self.ii, self.jj = jnp.tril_indices_from(self.mat, k=-1)
         self.vs = self.param(
             'embed_raw',
-            nn.initializers.truncated_normal(stddev=0.2, dtype=jnp.float32, lower=-2, upper=2),
+            nn.initializers.truncated_normal(stddev=0.2, dtype=jnp.bfloat16, lower=-2, upper=2),
             (self.n_species, self.embed_dim),
         )
 
@@ -109,20 +112,20 @@ class OrthoSpeciesEmbed(SpeciesTwoWayEmbed):
 
     def __call__(self, data: DataBatch):
         """Embeds the batch as a 3D image, shape batch n n n embed_dim."""
-        spec = jax.nn.one_hot(data.species, self.n_species, dtype=jnp.float32)
-        # debug_structure(spec=spec, mat=self.species_embed_matrix())
+        spec = jax.nn.one_hot(data.species, self.n_species, dtype=jnp.bfloat16)
+        # debug_structure(dens=data.density, spec=spec, mat=self.species_embed_matrix())
         return einops.einsum(
             data.density,
             spec,
             self.species_embed_matrix(),
             'batch n1 n2 n3 max_spec, batch max_spec n_spec, n_spec emb -> batch n1 n2 n3 emb',
-        )
+        ).astype(jnp.bfloat16)
 
     def decode(self, im, data: DataBatch):
         """Projects inputs to obtain the original densities."""
-        proj = EinsOp('batch n n n emb, n_spec emb -> batch n n n n_spec')(
-            im, self.species_embed_matrix()
-        )
+        # TODO use einsop when this doesn't overflow
+        proj = jnp.einsum('bxyze,se->bxyzs', im, self.species_embed_matrix())
+        proj = jnp.take_along_axis(proj, data.species[:, None, None, None, :], axis=-1)
         return proj
 
 class LossySpeciesEmbed(SpeciesTwoWayEmbed):
@@ -176,11 +179,11 @@ class GConv(nn.Module):
     def setup(self):
         self.basis = conv_basis(self.conv_size)
         self.basis = [np.equal(self.basis, k) for k in range(max(self.basis.flatten()) + 1)]
-        self.basis = jnp.array(self.basis, dtype=jnp.float32)
+        self.basis = jnp.array(self.basis, dtype=jnp.bfloat16)
         self.subspace_dim = self.basis.shape[0]
         self.kernel = self.param(
             'kernel',
-            nn.initializers.normal(stddev=1e-1),
+            nn.initializers.normal(stddev=1e-1, dtype=jnp.bfloat16),
             (self.subspace_dim, self.in_features, self.out_features),
         )
 
@@ -227,11 +230,19 @@ class EncoderDecoder(nn.Module):
     use_dec_conv: bool
     species_embed_dim: int
     n_species: int
+    species_embed_type: str
 
     def setup(self):
-        self.spec_emb = LossySpeciesEmbed(
-            n_species=self.n_species, embed_dim=self.species_embed_dim
-        )
+        if self.species_embed_type == 'ortho':
+            self.spec_emb = OrthoSpeciesEmbed(
+                n_species=self.n_species, embed_dim=self.species_embed_dim
+            )
+        elif self.species_embed_type == 'lossy':
+            self.spec_emb = LossySpeciesEmbed(
+                n_species=self.n_species, embed_dim=self.species_embed_dim
+            )
+        else:
+            raise ValueError('Species embed type not recognized:', self.species_embed_type)
         prev_feats = self.species_embed_dim
         enc_convs = []
         dec_convs = []
@@ -329,9 +340,9 @@ class SpaceGroupCategory(Category):
     @property
     def num_categories(self) -> int:
         if self.just_cubic:
-            return 230 - 194 + 1
+            return 230 - 194
         else:
-            return 230 + 1
+            return 230
 
 
 class DiLED(nn.Module):
@@ -340,7 +351,8 @@ class DiLED(nn.Module):
     encoder_decoder: EncoderDecoder
     diffusion: DiffusionModel
     category: Category
-    encoder: Encoder
+    encoder: Encoder | MLPMixer
+    perm_encoder: nn.Module
     head: nn.Module
     w: float = 1
     class_dropout: float = 0.5
@@ -365,40 +377,40 @@ class DiLED(nn.Module):
         # debug_structure(dens=dens)
         # dens_aligned = jnp.take_along_axis(dens, data.species[:, None, None, None, :], axis=-1)
         dens_aligned = dens
-        losses['dens_rec_loss'] = 1 * voxel_loss(dens_aligned, data.density)
+        losses['l_dens_rec'] = 2 * voxel_loss(dens_aligned, data.density)
         # debug_structure(x0=x_0, conv=conv, patch=patch, rec_x0=rec_x_0, dec=dec, dens=dens)
         # debug_stat(x0=x_0, conv=conv, patch=patch, rec_x0=rec_x_0, dec=dec, dens=dens)
-        losses['patch_reg_loss'] = 1 * voxel_loss(jnp.zeros_like(patch), patch)
+        losses['l_patch_reg'] = 0.01 * voxel_loss(jnp.zeros_like(patch), patch)
 
         y = self.category(data)
 
-        encoder = self.encoder.copy(equivariant=True)
+        encoder = self.encoder
         abys = ABY_IDENTITY
 
         patch_seq = EinsOp('b n n n d -> b (n n n) d')(patch)
         out = encoder(patch_seq, abys, training=training)
 
-        # batch seq dim -> batch dim*2
-        out = PermInvariantEncoder()(out, axis=1, keepdims=False)
-        out = nn.LayerNorm(dtype=out.dtype)(out)
+        out = DeepSetEncoder(phi=self.perm_encoder)(out, training=training)
         # debug_structure(out=out)
 
         head = self.head.copy(out_dim=3 + self.category.num_categories)
         out = jax.vmap(lambda x: head(x, training=training))(out)
 
-        debug_structure(out=out)
-        e_form, bandgap, magmom, *y_logits = out.T
-        bandgap = nn.leaky_relu(bandgap)
-        magmom = nn.leaky_relu(magmom)
-        y_logits = jnp.array(y_logits).T
+        # debug_structure(out=out)
+        e_form = out[:, 0]
+        bandgap = out[:, 1]
+        magmom = out[:, 2]
+        y_logits = out[:, 3:]
+        bandgap = nn.leaky_relu((3 * (bandgap - 1.2)))
+        magmom = nn.leaky_relu((3 * (magmom - 0.8)))        
 
-        losses['e_form_mae'] = jnp.mean(jnp.abs(e_form - data.e_form))
-        losses['bandgap_mae'] = jnp.mean(jnp.abs(bandgap - data.bandgap))
-        losses['magmom_mae'] = jnp.mean(jnp.abs(magmom - data.magmom))
-        losses['spacegroup_ce'] = optax.losses.softmax_cross_entropy_with_integer_labels(y_logits, y)
+        losses['e_form_mae'] = 0.03 * jnp.mean(jnp.abs(e_form - data.e_form))
+        losses['bandgap_mae'] = 0.03 * jnp.mean(jnp.abs(bandgap - data.bandgap))
+        losses['magmom_mae'] = 0.02 * jnp.mean(jnp.abs(magmom - data.magmom))
+        losses['spg_ce'] = 0.02 * optax.losses.softmax_cross_entropy_with_integer_labels(y_logits, y)
 
         if self.w == 0:
-            losses['loss'] = sum(losses.values())
+            losses['loss'] = sum(losses.values()) / len(losses)
             return losses
 
         t = jax.random.randint(
@@ -421,7 +433,7 @@ class DiLED(nn.Module):
             loss = voxel_loss(patch, mu_2_1['mu'])
             return loss * 1000
 
-        losses['align_loss'] = l_align(eps) / self.diffusion.schedule.max_t
+        losses['l_align'] = l_align(eps) / self.diffusion.schedule.max_t
 
         def l_diffusion(eps):
             x_t = self.diffusion.q_sample(enc, t, eps)
@@ -431,7 +443,7 @@ class DiLED(nn.Module):
             )
             return voxel_loss(mu_eps['eps'], eps)
 
-        losses['diffusion_loss'] = self.w * l_diffusion(eps)
+        losses['l_diffuse'] = self.w * l_diffusion(eps)
 
-        losses['loss'] = sum(losses.values())
+        losses['loss'] = sum(losses.values()) / len(losses)
         return losses

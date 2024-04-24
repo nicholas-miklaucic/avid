@@ -175,14 +175,7 @@ class Encoder1DBlock(nn.Module):
         y = nn.LayerNorm(scale_init=nn.zeros, dtype=x.dtype)(x)
         y = y * y2 + b2
 
-        # TODO fix ugly hack
-        mlp = LazyInMLP(
-            self.mlp.inner_dims,
-            x.shape[2],
-            self.mlp.inner_act,
-            self.mlp.final_act,
-            dropout_rate=self.mlp.dropout_rate,
-        )
+        mlp = self.mlp.copy(out_dim=x.shape[2])
         y = jax.vmap(jax.vmap(lambda yy: mlp(yy, training=training)))(y)
         y = y * a2
 

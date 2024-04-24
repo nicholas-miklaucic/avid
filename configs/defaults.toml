@@ -26,10 +26,10 @@ o3 = true
 t3 = true
 
 [data_transform]
-density_transform_name = "logit"
+density_transform_name = "log"
 density_scale = 0.25
 density_shift = 1
-eps = 1e-8
+eps = 1e-6
 
 [cli]
 verbosity = "info"
@@ -66,13 +66,15 @@ patch_conv_strides = [ 3,]
 patch_conv_features = [ 384,]
 use_dec_conv = false
 species_embed_dim = 128
+species_embed_type = "lossy"
 w = 1
 
 [mlp]
 patch_size = 3
 patch_heads = 8
 patch_latent_dim = 512
-num_blocks = 4
+num_layers = 4
+num_heads = 4
 out_dim = 1
 
 [vit.vit_input]
@@ -84,14 +86,18 @@ patch_heads = 8
 
 [vit.encoder]
 num_layers = 2
-num_heads = 4
+num_heads = 16
 enc_dropout_rate = 0.1
-enc_attention_dropout_rate = 0.0
-equivariant = false
+enc_attention_dropout_rate = 0.1
+equivariant = true
+encoder_type = "vit"
 
 [vit.head]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
 equivariant = false
 
 [vit.species_embed]
@@ -119,24 +125,52 @@ class_dropout = 0.5
 category_loss_type = "cubic_space_group"
 num_bins = 8
 
+[diled.encoder]
+num_layers = 2
+num_heads = 16
+enc_dropout_rate = 0.1
+enc_attention_dropout_rate = 0.1
+equivariant = true
+encoder_type = "vit"
+
 [diled.head]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
+equivariant = false
+
+[diled.perm_head]
+inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
+dropout = 0.1
+num_heads = 1
 equivariant = false
 
 [mlp.token_mixer]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
 equivariant = true
 
 [mlp.channel_mixer]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
 equivariant = false
 
 [mlp.head]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
 equivariant = false
 
 [mlp.species_embed]
@@ -154,94 +188,82 @@ use_rmse = false
 
 [vit.encoder.mlp]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
 equivariant = false
 
-[vit.head.activation]
-name = "relu"
-
-[vit.head.final_activation]
-name = "Identity"
+[vit.encoder.token_mixer]
+inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
+dropout = 0.1
+num_heads = 1
+equivariant = false
 
 [vit.species_embed.spec_embed]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 out_dim = 64
 dropout = 0.1
+num_heads = 1
 equivariant = false
 
 [diled.backbone.time_mlp]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
 equivariant = false
 
 [diled.backbone.encoder]
 num_layers = 2
-num_heads = 4
+num_heads = 16
 enc_dropout_rate = 0.1
-enc_attention_dropout_rate = 0.0
+enc_attention_dropout_rate = 0.1
+equivariant = true
+encoder_type = "vit"
+
+[diled.encoder.mlp]
+inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
+dropout = 0.1
+num_heads = 1
 equivariant = false
 
-[diled.head.activation]
-name = "relu"
-
-[diled.head.final_activation]
-name = "Identity"
-
-[mlp.token_mixer.activation]
-name = "gelu"
-
-[mlp.token_mixer.final_activation]
-name = "Identity"
-
-[mlp.channel_mixer.activation]
-name = "gelu"
-
-[mlp.channel_mixer.final_activation]
-name = "Identity"
-
-[mlp.head.activation]
-name = "relu"
-
-[mlp.head.final_activation]
-name = "Identity"
+[diled.encoder.token_mixer]
+inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
+dropout = 0.1
+num_heads = 1
+equivariant = false
 
 [mlp.species_embed.spec_embed]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 out_dim = 64
 dropout = 0.1
+num_heads = 1
 equivariant = false
-
-[vit.encoder.mlp.activation]
-name = "relu"
-
-[vit.encoder.mlp.final_activation]
-name = "Identity"
-
-[vit.species_embed.spec_embed.activation]
-name = "relu"
-
-[vit.species_embed.spec_embed.final_activation]
-name = "Identity"
-
-[diled.backbone.time_mlp.activation]
-name = "relu"
-
-[diled.backbone.time_mlp.final_activation]
-name = "Identity"
 
 [diled.backbone.encoder.mlp]
 inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
 dropout = 0.1
+num_heads = 1
 equivariant = false
 
-[mlp.species_embed.spec_embed.activation]
-name = "relu"
-
-[mlp.species_embed.spec_embed.final_activation]
-name = "Identity"
-
-[diled.backbone.encoder.mlp.activation]
-name = "relu"
-
-[diled.backbone.encoder.mlp.final_activation]
-name = "Identity"
+[diled.backbone.encoder.token_mixer]
+inner_dims = []
+activation = "gelu"
+final_activation = "Identity"
+dropout = 0.1
+num_heads = 1
+equivariant = false

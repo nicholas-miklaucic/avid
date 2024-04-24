@@ -19,7 +19,7 @@ from avid.augmentations import randomly_augment
 from avid.config import MainConfig
 from avid.databatch import DataBatch
 from avid.metadata import Metadata
-from avid.utils import debug_structure, load_pytree
+from avid.utils import debug_stat, debug_structure, load_pytree
 
 filterwarnings('ignore', category=BeartypeDecorHintPep585DeprecationWarning)
 
@@ -33,10 +33,18 @@ def load_file(config: MainConfig, file_num=0) -> DataBatch:
 
     dens_transform = config.data_transform.density_transform()
 
+    # if np.any(np.isnan(data['density'])):
+    #     print(data['index'][28])
+    #     debug_structure(density=data['density'])
+    #     print(np.where(np.isnan(data['density'])))
+    #     debug_stat(density=data['density'])
     data['density'] = dens_transform(data['density'])
 
     for k, v in data.items():
         if v.dtype == np.float32:
+            if np.any(np.isnan(v)):
+                print(k)
+                raise ValueError
             data[k] = jnp.array(v, dtype=jnp.bfloat16)
         else:
             data[k] = jnp.array(v)

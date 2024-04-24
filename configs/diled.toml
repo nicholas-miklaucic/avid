@@ -1,4 +1,4 @@
-batch_size = 64
+batch_size = 32
 do_profile = false
 num_epochs = 50
 regressor = "vit"
@@ -16,16 +16,16 @@ dataset_name = "jarvis_dft3d_cleaned"
 raw_data_folder = "data"
 data_folder = "precomputed"
 shuffle_seed = 1618
-train_split = 20
+train_split = 21
 test_split = 1
-valid_split = 4
+valid_split = 3
 do_augment = false
 
 [data_transform]
-density_transform_name = "positive"
-density_scale = 1
-density_shift = 0
-eps = 0
+density_transform_name = "log"
+density_scale = 0.25
+density_shift = 1
+eps = 1e-12
 
 [cli]
 verbosity = "info"
@@ -34,7 +34,7 @@ show_progress = true
 [train]
 lr_schedule_kind = "cosine"
 start_lr_frac = 0.1
-base_lr = 0.001
+base_lr = 0.01
 end_lr_frac = 0.01
 weight_decay = 0
 beta_1 = 0.9
@@ -43,11 +43,13 @@ nestorov = true
 max_grad_norm = 3.0
 
 [diled]
-patch_latent_dim = 128
+patch_latent_dim = 256
 patch_conv_sizes = [5]
 patch_conv_strides = [3]
-patch_conv_features = [64]
-species_embed_dim = 32
+patch_conv_features = [32]
+species_embed_dim = 96
+species_embed_type = "ortho"
+use_dec_conv = true
 w = 0
 
 [diled.backbone]
@@ -63,7 +65,7 @@ timesteps = 100
 class_dropout = 0.25
 
 [diled.category]
-category_loss_type = "e_form"
+category_loss_type = "cubic_space_group"
 
 [diled.backbone.time_mlp]
 inner_dims = []
@@ -74,27 +76,44 @@ equivariant = false
 equivariant = true
 num_layers = 3
 num_heads = 16
-enc_dropout_rate = 0.1
-enc_attention_dropout_rate = 0.1
+enc_dropout_rate = 0.3
+enc_attention_dropout_rate = 0.3
 
 [diled.head]
-inner_dims = [256]
-dropout = 0.1
+inner_dims = [2048]
+dropout = 0.5
 equivariant = false
 
+[diled.head.activation]
+name = "silu"
+
+[diled.head.final_activation]
+name = "Identity"
+
 [diled.backbone.time_mlp.activation]
-name = "gelu"
+name = "silu"
 
 [diled.backbone.time_mlp.final_activation]
 name = "Identity"
 
 [diled.backbone.encoder.mlp]
 inner_dims = []
-dropout = 0.1
+dropout = 0.2
 equivariant = false
 
 [diled.backbone.encoder.mlp.activation]
-name = "gelu"
+name = "silu"
 
 [diled.backbone.encoder.mlp.final_activation]
+name = "Identity"
+
+[diled.perm_head]
+inner_dims = [1024]
+dropout = 0.5
+equivariant = false
+
+[diled.perm_head.activation]
+name = "silu"
+
+[diled.perm_head.final_activation]
 name = "Identity"

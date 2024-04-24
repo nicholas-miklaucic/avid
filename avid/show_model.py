@@ -6,7 +6,7 @@ import pyrallis
 from jax.lib import xla_client
 
 from avid.config import MainConfig
-from avid.dataset import load_file
+from avid.dataset import dataloader, load_file
 from avid.utils import debug_stat, debug_structure, flax_summary
 
 
@@ -18,7 +18,9 @@ def to_dot_graph(x):
 @pyrallis.argparsing.wrap()
 def show_model(config: MainConfig, make_hlo_dot=False):
     kwargs = dict(training=False)
-    batch = load_file(config, 0)
+    num_batches, dl = dataloader(config, split='train')
+    for i, b in zip(range(3), dl):
+        batch = b
 
     if config.task == 'e_form':
         mod = config.build_regressor()

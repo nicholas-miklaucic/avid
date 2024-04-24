@@ -19,6 +19,7 @@ from textual_plotext import PlotextPlot
 
 from avid.config import MainConfig
 from avid.training_state import TrainingRun
+from avid.utils import format_scalar
 
 
 class Losses(PlotextPlot):
@@ -55,7 +56,7 @@ class Losses(PlotextPlot):
 
     def replot(self) -> None:
         """Redraw the plot."""
-        if self._data and next(iter(self._data.values())):
+        if self._data and len(next(iter(self._data.values()))) > 0:
             self.plt.clear_data()
             nvals = len((list(self._data.values()) + [[0]])[0])
             self.plt.ylabel(self._unit)
@@ -136,7 +137,7 @@ class Info(Widget):
         tab.clear(columns=True)
         df = pd.DataFrame(dataa)
         tab.add_columns(*df.columns)
-        tab.add_rows(df.map(lambda x: '{:.03f}'.format(x)).values[-15:])
+        tab.add_rows(df.map(format_scalar).values[-15:])
 
     def compose(self):
         self.widget = DataTable(show_cursor=False, zebra_stripes=True)
@@ -176,7 +177,7 @@ class Dashboard(App):
     colors = reactive(lambda: rp.matplotlib.DARK_COLORS)
 
     def __init__(
-        self, run: TrainingRun, config: MainConfig, plot_cols=('train_', 'test_', 'epoch')
+        self, run: TrainingRun, config: MainConfig, plot_cols=('tr', 'te', 'epoch')
     ) -> None:
         """Initialise the application."""
         super().__init__()
@@ -184,7 +185,7 @@ class Dashboard(App):
         self._plot_cols = plot_cols
         self._config = config
         self.info = Info()
-        self.progress = ProgressBar(total=run.num_epochs * run.steps_in_epoch, id='bar')
+        self.progress = ProgressBar(total=(run.num_epochs - 1) * run.steps_in_epoch, id='bar')
 
     def on_mount(self):
         self.log(self._run)
@@ -214,7 +215,9 @@ class Dashboard(App):
 
         self.info.update_data(self.data)
         steps = max(self.data['step']) if 'step' in self.data else 1
-        self.progress.update(progress=steps)
+
+        if steps > self._run.steps_in_epoch:
+            self.progress.update(progress=steps - self._run.steps_in_epoch)
         self.refresh(layout=True)
 
     def watch_colors(self) -> None:

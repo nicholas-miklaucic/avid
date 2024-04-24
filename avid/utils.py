@@ -24,6 +24,44 @@ ELEM_VALS = 'Li Be B N O F Na Mg Al Si S K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge
     ' '
 )
 
+def format_scalar(scalar: int | float, chars=6) -> str:
+    """Formats the scalar using no more than the given number of characters, if possible."""
+    if scalar < 0:
+        return '-' + format_scalar(scalar, chars=chars-1)    
+    if isinstance(scalar, int):
+        if len(str(scalar)) - chars > 3:
+            # egregiously longer, use scientific notation
+            used = len('{:.0E}'.format(scalar))
+            remaining = max(chars - used, 0)
+            return '{:.dE}'.replace('d', str(remaining)).format(scalar)
+        else:
+            return str(scalar)
+    else:
+        if scalar == int(scalar):
+            return format_scalar(int(scalar), chars=chars - 1) + '.'
+        
+        decimal = str(scalar)
+        if decimal.startswith('0.'):
+            frac = decimal.removeprefix('0.')
+            wasted = len(frac.lstrip('0')) - len(decimal.replace('.', ''))
+        else:
+            wasted = len(decimal.replace('.', '').rstrip('0')) - len(decimal.replace('.', ''))
+
+        suffix = '{:.0e}'.format(scalar)[1:]
+        if wasted > len(suffix):
+            used = len('{:.0E}'.format(scalar))
+            remaining = max(chars - used, 0)
+            return '{:.dE}'.replace('d', str(remaining)).format(scalar)
+        else:
+            remaining = max(chars - 2, 0)
+            return '{:.df}'.replace('d', str(remaining)).format(scalar)
+
+def item_if_arr(x: int | float | jax.Array) -> float:
+    if isinstance(x, (int, float)):
+        return x
+    else:
+        return x.item()
+
 
 # checker = typechecker(conf=BeartypeConf(is_color=False))
 tcheck = partial(jaxtyped, typechecker=None)
@@ -44,11 +82,11 @@ def load_pytree(file: PathLike):
     """Loads a MsgPack serialized PyTree."""
     with open(Path(file), 'rb') as infile:
         return msgpack_restore(infile.read())
-    
+
 def save_pytree(obj, file: PathLike):
     """Saves a MsgPack serialized PyTree."""
     with open(Path(file), 'wb') as out:
-        out.write(msgpack_serialize(obj))        
+        out.write(msgpack_serialize(obj))
 
 
 

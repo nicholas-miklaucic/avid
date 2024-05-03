@@ -135,12 +135,12 @@ class LossySpeciesEmbed(SpeciesTwoWayEmbed):
 
     def setup(self):
         self.emb = nn.Embed(self.n_species, self.embed_dim, dtype=jnp.bfloat16)
-        self.decoder = LazyInMLP(
-            inner_dims=[64],
-            out_dim=self.n_species,
-            name='species_decoder',
-            inner_act=nn.gelu,
-        )
+        # self.decoder = LazyInMLP(
+        #     inner_dims=[64],
+        #     out_dim=self.n_species,
+        #     name='species_decoder',
+        #     inner_act=nn.gelu,
+        # )
 
     def species_embed_matrix(self):
         """Generates species embedding matrix of orthogonal vectors: (n_species, embed_dim)."""
@@ -161,10 +161,32 @@ class LossySpeciesEmbed(SpeciesTwoWayEmbed):
 
     def decode(self, im, data: DataBatch):
         """Projects inputs to obtain the original densities."""
+        # dens: b n3 s
+        # encoded: b n3 e
+        # embs: b s e
+        # solve for dens from encoded, embs
+        # (b e s)(b s n3) = b e n3
 
-        out = self.decoder(im, training=True)
-        out = jnp.take_along_axis(out, data.species[:, None, None, None, :], axis=-1)
-        return out
+        embs_flip = EinsOp('b s e -> b e s')
+        emb_reshape = EinsOp('b n n n e -> b e (n n n)')
+        dens_reshape = EinsOp('b n n n s -> b s (n n n)')
+        dens_unpack = EinsOp('b s (n=24 n n) -> b n n n s')
+
+        embs = jnp.take(self.emb.embedding, data.species, axis=0) * data.mask[..., None]
+
+        # Least-squares solving gradients are not stable. Instead of solving Ax = b
+        # and then comparing x to the actual density, which won't work because dx/dθ is unstable,
+        # we compare A @ x_true with b.
+        E = embs_flip(jax.lax.stop_gradient(embs))
+        ENC = emb_reshape(jax.lax.stop_gradient(im))
+
+        x, resid, rank, s = jax.vmap(jnp.linalg.lstsq)(E.astype(float), ENC.astype(float))
+
+        im_hat = EinsOp('b s e, b n n n s -> b n n n e')(embs, data.density)
+        dens = dens_unpack(x)
+
+        out = jnp.take_along_axis(dens, data.species[:, None, None, None, :], axis=-1)
+        return out, im_hat
 
 
 class GConv(nn.Module):
@@ -264,26 +286,31 @@ class EncoderDecoder(nn.Module):
         if self.use_dec_conv:
             self.decoder_conv = nn.Sequential(dec_convs[::-1])
 
-        self.patch_proj = nn.DenseGeneral(
-            features=self.patch_latent_dim, axis=-1, dtype=jnp.bfloat16
-        )
+        self.patch_proj = nn.Sequential([nn.LayerNorm(dtype=jnp.bfloat16), nn.DenseGeneral(
+            features=self.patch_latent_dim, axis=-1, dtype=jnp.bfloat16),
+        nn.LayerNorm(dtype=jnp.bfloat16)])
 
         if self.use_dec_conv:
-            self.dec_patch_proj = nn.DenseGeneral(features=feats, axis=-1, dtype=jnp.bfloat16)
+            self.dec_patch_proj = nn.Sequential([
+                nn.LayerNorm(dtype=jnp.bfloat16),
+                nn.DenseGeneral(features=feats, axis=-1, dtype=jnp.bfloat16),
+            ])
         else:
-            self.dec_patch_proj = nn.DenseGeneral(
+            self.dec_patch_proj = nn.Sequential([nn.LayerNorm(dtype=jnp.bfloat16), nn.DenseGeneral(
                 features=int(np.prod(self.patch_conv_strides) ** 3 * self.species_embed_dim),
                 axis=-1,
                 dtype=jnp.bfloat16,
-            )
+            )])
 
     def encode(self, data: DataBatch, training: bool):
+        """Returns (spec_emb, enc_conv, patches)"""
         spec_emb = self.spec_emb(data)
         enc = self.encoder_conv(spec_emb)
         patches = self.patch_proj(enc)
         return (spec_emb, enc, patches)
 
     def patch_decode(self, patches, data: DataBatch, training: bool):
+        """Returns (density, rec_spec_emb, spec_emb, dec_conv)"""
         dec = self.dec_patch_proj(patches)
         if self.use_dec_conv:
             spec_emb = self.decoder_conv(dec)
@@ -293,8 +320,8 @@ class EncoderDecoder(nn.Module):
                 symbol_values={'d': self.species_embed_dim},
             )(dec)
 
-        dens = self.spec_emb.decode(spec_emb, data)
-        return (dens, spec_emb, dec)
+        dens, rec_spec_emb = self.spec_emb.decode(spec_emb, data)
+        return (dens, rec_spec_emb, spec_emb, dec)
 
 
 class Category:
@@ -366,7 +393,7 @@ class DiLED(nn.Module):
         eps_0 = jax.random.normal(self.make_rng('noise'), shape=enc.shape)
         x_1 = enc + beta_0 * eps_0
 
-        dens, rec_x_0, dec = self.encoder_decoder.patch_decode(x_1, data, training=training)
+        dens, rec_x_0_hat, rec_x_0, dec = self.encoder_decoder.patch_decode(x_1, data, training=training)
 
         losses = {}
 
@@ -374,13 +401,11 @@ class DiLED(nn.Module):
             return jnp.sqrt(jnp.mean(jnp.square(x1 - x2)))
 
         # print(data.species)
-        # debug_structure(dens=dens)
-        # dens_aligned = jnp.take_along_axis(dens, data.species[:, None, None, None, :], axis=-1)
-        dens_aligned = dens
-        losses['l_dens_rec'] = 2 * voxel_loss(dens_aligned, data.density)
-        # debug_structure(x0=x_0, conv=conv, patch=patch, rec_x0=rec_x_0, dec=dec, dens=dens)
-        # debug_stat(x0=x_0, conv=conv, patch=patch, rec_x0=rec_x_0, dec=dec, dens=dens)
-        losses['l_patch_reg'] = 0.01 * voxel_loss(jnp.zeros_like(patch), patch)
+        # losses['l_dens_rec'] = 2 * voxel_loss(dens, data.density)
+
+        # losses['l_patch_rec'] = 0 * voxel_loss(rec_x_0, x_0)
+        # losses['l_spec_rec'] = 0 * voxel_loss(rec_x_0_hat, rec_x_0)        
+        # losses['l_patch_reg'] = 0 * voxel_loss(jnp.zeros_like(patch), patch)
 
         y = self.category(data)
 
@@ -402,15 +427,24 @@ class DiLED(nn.Module):
         magmom = out[:, 2]
         y_logits = out[:, 3:]
         bandgap = nn.leaky_relu((3 * (bandgap - 1.2)))
-        magmom = nn.leaky_relu((3 * (magmom - 0.8)))        
+        magmom = nn.leaky_relu((3 * (magmom - 0.8)))
 
-        losses['e_form_mae'] = 0.03 * jnp.mean(jnp.abs(e_form - data.e_form))
-        losses['bandgap_mae'] = 0.03 * jnp.mean(jnp.abs(bandgap - data.bandgap))
-        losses['magmom_mae'] = 0.02 * jnp.mean(jnp.abs(magmom - data.magmom))
-        losses['spg_ce'] = 0.02 * optax.losses.softmax_cross_entropy_with_integer_labels(y_logits, y)
+        def smooth_l1(x, b=3):
+            d = b * x
+            l = jnp.log(jnp.cosh(d)) + jnp.log(2) * jnp.square(jnp.tanh(d))
+            return l / b
+        
+        mean_loss = lambda x, y: jnp.mean(smooth_l1(x, y))
+
+        mean_loss = lambda x, y: jnp.sqrt(jnp.mean(jnp.square(x - y)))
+
+        losses['e_form'] = 1 * mean_loss(e_form, data.e_form)
+        losses['bandgap'] = 0.1 * mean_loss(bandgap, data.bandgap)
+        # losses['magmom_mae'] = 0.2 * jnp.mean(jnp.abs(magmom - data.magmom))
+        losses['spg_ce'] = 0.1 * jnp.mean(optax.losses.softmax_cross_entropy_with_integer_labels(y_logits, y))
 
         if self.w == 0:
-            losses['loss'] = sum(losses.values()) / len(losses)
+            losses['loss'] = sum(losses.values())
             return losses
 
         t = jax.random.randint(

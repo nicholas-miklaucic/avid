@@ -40,6 +40,7 @@ def load_file(config: MainConfig, file_num=0) -> DataBatch:
     #     debug_stat(density=data['density'])
     data['density'] = dens_transform(data['density'])
 
+
     for k, v in data.items():
         if v.dtype == np.float32:
             if np.any(np.isnan(v)):
@@ -48,6 +49,8 @@ def load_file(config: MainConfig, file_num=0) -> DataBatch:
             data[k] = jnp.array(v, dtype=jnp.bfloat16)
         else:
             data[k] = jnp.array(v)
+
+    # print(jnp.mean(data['density']), '±', jnp.std(data['density']))
 
     return DataBatch(**data)
 

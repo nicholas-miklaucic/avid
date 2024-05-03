@@ -118,22 +118,11 @@ class DataConfig:
 
 @dataclass
 class DataTransformConfig:
-    # Density transform: Eins elementwise string.
-    density_transform_name: str = 'log'
-    # Density scale: returns density * scale + shift.
-    density_scale: float = 0.25
-    # Density shift
-    density_shift: float = 1
-    # Epsilon to avoid zeros:
-    eps: float = 1e-6
+    # Density power to transform as.
+    density_power: float = 1 / 9
 
     def density_transform(self) -> ElementwiseOp:
-        if self.density_transform_name == 'logit':
-            func = jax.scipy.special.logit
-        else:
-            func = getattr(E, self.density_transform_name)
-
-        return E.from_func(lambda x: func(x + self.eps) * self.density_scale + self.density_shift)
+        return E.from_func(lambda x: x ** self.density_power)
 
 
 

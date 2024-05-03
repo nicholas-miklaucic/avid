@@ -1,6 +1,6 @@
 batch_size = 64
 do_profile = false
-num_epochs = 100
+num_epochs = 50
 regressor = "vit"
 task = "diled"
 
@@ -26,10 +26,6 @@ o3 = true
 t3 = true
 
 [data_transform]
-density_transform_name = "log"
-density_scale = 0.25
-density_shift = 1
-eps = 1e-12
 
 [cli]
 verbosity = "info"
@@ -49,7 +45,7 @@ lr_schedule_kind = "cosine"
 start_lr_frac = 0.1
 base_lr = 0.004
 end_lr_frac = 0.04
-weight_decay = 0.03
+weight_decay = 0.05
 beta_1 = 0.9
 beta_2 = 0.999
 nestorov = true
@@ -59,10 +55,10 @@ max_grad_norm = 3.0
 patch_latent_dim = 256
 patch_conv_sizes = [3]
 patch_conv_strides = [3]
-patch_conv_features = [32]
+patch_conv_features = [64]
 use_dec_conv = false
-species_embed_dim = 96
-species_embed_type = "ortho"
+species_embed_dim = 64
+species_embed_type = "lossy"
 w = 0
 
 [diled.backbone]
@@ -81,18 +77,18 @@ class_dropout = 0.5
 category_loss_type = "cubic_space_group"
 
 [diled.encoder]
-num_layers = 1
-num_heads = 8
+num_layers = 2
+num_heads = 16
 enc_dropout_rate = 0.1
 enc_attention_dropout_rate = 0.1
 equivariant = true
 encoder_type = "mlp"
 
 [diled.head]
-inner_dims = [1024, 512]
+inner_dims = [2048, 1024]
 activation = "gelu"
 final_activation = "Identity"
-dropout = 0.5
+dropout = 0.3
 equivariant = false
 
 [diled.perm_head]
@@ -111,7 +107,7 @@ dropout = 0.1
 equivariant = false
 
 [diled.backbone.encoder]
-num_layers = 2
+num_layers = 3
 num_heads = 16
 enc_dropout_rate = 0.1
 enc_attention_dropout_rate = 0.1
@@ -123,10 +119,11 @@ inner_dims = []
 activation = "gelu"
 final_activation = "Identity"
 dropout = 0.1
-equivariant = false
+num_heads = 16
+equivariant = true
 
 [diled.encoder.token_mixer]
-inner_dims = []
+inner_dims = [1024]
 activation = "gelu"
 final_activation = "Identity"
 dropout = 0.1

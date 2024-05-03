@@ -1,6 +1,6 @@
 batch_size = 32
 do_profile = false
-num_epochs = 50
+num_epochs = 100
 regressor = "vit"
 task = "diled"
 
@@ -43,12 +43,12 @@ nestorov = true
 max_grad_norm = 3.0
 
 [diled]
-patch_latent_dim = 256
-patch_conv_sizes = [5]
+patch_latent_dim = 512
+patch_conv_sizes = [3]
 patch_conv_strides = [3]
 patch_conv_features = [32]
-species_embed_dim = 96
-species_embed_type = "ortho"
+species_embed_dim = 128
+species_embed_type = "lossy"
 use_dec_conv = true
 w = 0
 

@@ -278,5 +278,6 @@ def flax_summary(
         pad_num = len(m.group(0)) - len(human)
         return ' ' * pad_num + human
 
-    out = re.sub(r'\d' * 6 + '+', human_units, out)
+    out = re.sub(r'\d' * 6 + '+', human_units, out)    
+
     print(out)
